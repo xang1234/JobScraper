@@ -7,6 +7,7 @@ from selenium.webdriver.common.by import By
 from time import sleep
 from datetime import date
 import sys
+import math
 
 driver = webdriver.Chrome("ChromeDriver_Path/chromedriver")
 today = date.today()
@@ -54,7 +55,17 @@ jd_l=[]
 company_info_l=[]
 # Loop through 100 pages.
 count = -1
-for page in range(15):
+
+driver.get(f'https://www.mycareersfuture.sg/search?search={key}&sortBy=new_posting_date&page=0')
+total_jobs=int(driver.find_element(By.XPATH,'//*[@id="search-result-headers"]/div/div[1]').get_attribute("innerText").split("\n")[0].split(" ")[0])
+
+print('number of jobs: ',total_jobs)
+
+pages= math.ceil(total_jobs/20)
+    
+print('number of pages: ',pages)
+
+for page in range(pages):
     driver.get(f'https://www.mycareersfuture.sg/search?search={key}&sortBy=new_posting_date&page={page}')
     sleep(6)
 
