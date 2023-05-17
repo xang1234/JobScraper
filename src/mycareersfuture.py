@@ -53,16 +53,13 @@ last_post_l=[]
 expiry_l=[]
 jd_l=[]
 company_info_l=[]
-# Loop through 100 pages.
 count = -1
 
+# detect the number of pages
 driver.get(f'https://www.mycareersfuture.sg/search?search={key}&sortBy=new_posting_date&page=0')
 total_jobs=int(driver.find_element(By.XPATH,'//*[@id="search-result-headers"]/div/div[1]').get_attribute("innerText").split("\n")[0].split(" ")[0])
-
 print('number of jobs: ',total_jobs)
-
 pages= math.ceil(total_jobs/20)
-    
 print('number of pages: ',pages)
 
 for page in range(pages):
