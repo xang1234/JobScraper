@@ -38,7 +38,6 @@ for search in keys:
             key += item
     search_keys.append(key.lower())
 
-
 print(search_keys)
 # Create empty DataFrame to store the data.
 columns = [
@@ -70,7 +69,6 @@ last_post_l=[]
 expiry_l=[]
 jd_l=[]
 company_info_l=[]
-# Loop through 100 pages.
 
 
 for key in search_keys:
