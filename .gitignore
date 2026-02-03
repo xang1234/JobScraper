@@ -43,7 +43,7 @@ data/*.csv
 data/*.json
 data/*.log
 data/.scraper.pid
-
+data/scrape_jsons/*json
 # macOS
 .DS_Store
 
