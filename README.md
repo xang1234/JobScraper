@@ -22,16 +22,24 @@ A fast, reliable job market data collection system for MyCareersFuture.sg. Colle
 poetry install
 
 # Preview search results
-python -m src.cli preview "data scientist"
+poetry run python -m src.cli preview "data scientist"
 
 # Scrape jobs (stores in SQLite + exports CSV)
-python -m src.cli scrape "data scientist"
+poetry run python -m src.cli scrape "data scientist"
 
 # Query the database
-python -m src.cli stats
-python -m src.cli list --limit 20
-python -m src.cli search "machine learning"
+poetry run python -m src.cli stats
+poetry run python -m src.cli list --limit 20
+poetry run python -m src.cli search "machine learning"
+
+# Start long-running historical scrape (daemon mode)
+poetry run python -m src.cli daemon start --year 2023
+
+# Monitor progress
+poetry run python -m src.cli historical-status
 ```
+
+> **Tip:** Add an alias for convenience: `alias mcf="poetry run python -m src.cli"`
 
 ## Installation
 
@@ -39,8 +47,8 @@ Requires Python 3.10+
 
 ```bash
 # Clone the repository
-git clone <repo-url>
-cd MyCareersFuture
+git clone https://github.com/xang1234/JobScraper.git
+cd JobScraper
 
 # Install with Poetry
 poetry install
@@ -126,6 +134,92 @@ python -m src.cli daemon stop
 - PID file at `data/.scraper.pid`
 - Logs to `data/scraper_daemon.log`
 - Adaptive rate limiting adjusts automatically to API responses
+
+### Monitoring Progress
+
+Several commands help you monitor scraping progress:
+
+**Historical scrape status** - Shows progress per year with jobs found:
+```bash
+python -m src.cli historical-status
+```
+
+```
+Historical Scrape Status
+
+Active Sessions:
+
+┏━━━━┳━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+┃    ┃      ┃               ┃       ┃           ┃  Consecutive ┃               ┃
+┃ ID ┃ Year ┃      Progress ┃ Found ┃ Not Found ┃           NF ┃ Started       ┃
+┡━━━━╇━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+│ 6  │ 2022 │ 245/1,000,000 │   243 │         0 │            0 │ 2026-02-03    │
+│    │      │        (0.0%) │       │           │              │ 00:39         │
+│ 7  │ 2019 │    885/50,000 │   862 │        21 │            0 │ 2026-02-03    │
+│    │      │        (1.8%) │       │           │              │ 02:50         │
+└────┴──────┴───────────────┴───────┴───────────┴──────────────┴───────────────┘
+
+Jobs in Database by Year:
+
+┏━━━━━━┳━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━┓
+┃ Year ┃  Jobs ┃ Est. Total ┃ Coverage ┃
+┡━━━━━━╇━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━┩
+│ 2024 │     9 │ ~1,450,000 │     0.0% │
+│ 2023 │ 4,246 │ ~1,000,000 │     0.4% │
+│ 2022 │   200 │ ~1,000,000 │     0.0% │
+│ 2019 │   862 │    ~50,000 │     1.7% │
+└──────┴───────┴────────────┴──────────┘
+```
+
+**Fetch attempt statistics** - Shows found/not_found/error counts:
+```bash
+python -m src.cli attempt-stats
+```
+
+```
+Fetch Attempt Statistics
+
+┏━━━━━━┳━━━━━━━┳━━━━━━━┳━━━━━━━━━━━┳━━━━━━━━━┳━━━━━━━━┓
+┃ Year ┃ Total ┃ Found ┃ Not Found ┃ Skipped ┃ Errors ┃
+┡━━━━━━╇━━━━━━━╇━━━━━━━╇━━━━━━━━━━━╇━━━━━━━━━╇━━━━━━━━┩
+│ 2019 │   883 │   862 │        21 │       0 │      0 │
+└──────┴───────┴───────┴───────────┴─────────┴────────┘
+
+Grand total: 883 attempts, 862 jobs found
+```
+
+**Database statistics** - Shows totals, salary ranges, top companies:
+```bash
+python -m src.cli stats
+```
+
+```
+Database Statistics
+
+Total jobs: 6,361
+Jobs with history: 0
+History records: 0
+Added today: 6,361
+Updated today: 0
+
+Salary range: $1 - $500,000
+Average range: $5,794 - $9,328
+
+By Employment Type:
+  Permanent: 2,299
+  Full Time: 2,101
+  Contract: 698
+
+Top Companies:
+  DBS BANK LTD.: 264 jobs
+  THE SUPREME HR ADVISORY PTE. LTD.: 251 jobs
+  TIKTOK PTE. LTD.: 154 jobs
+```
+
+**Live daemon logs:**
+```bash
+tail -f data/scraper_daemon.log
+```
 
 ### Gap Analysis and Retry
 

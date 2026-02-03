@@ -23,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Callable, Awaitable
 
+from tenacity import RetryError
+
 from .api_client import MCFClient, MCFNotFoundError, MCFRateLimitError, MCFAPIError
 from .adaptive_rate import AdaptiveRateLimiter
 from .batch_logger import BatchLogger
@@ -350,6 +352,36 @@ class HistoricalScraper:
 
                 except MCFAPIError as e:
                     logger.error(f"API error at {year}-{current_seq}: {e}")
+                    self.batch_logger.log(year, current_seq, 'error', str(e))
+                    self.rate_limiter.on_error()
+                    jobs_not_found += 1
+                    consecutive_not_found += 1
+
+                except RetryError as e:
+                    # Tenacity exhausted retries - check if underlying cause was rate limit
+                    cause = e.last_attempt.exception() if e.last_attempt else None
+                    if isinstance(cause, MCFRateLimitError):
+                        new_rps = self.rate_limiter.on_rate_limited()
+                        if self._client:
+                            self._client.requests_per_second = new_rps
+                        backoff_delay = 1.0 / new_rps + 5.0  # Longer backoff after retry exhaustion
+                        logger.warning(
+                            f"Retries exhausted due to rate limiting at seq {current_seq}, "
+                            f"backing off {backoff_delay:.1f}s, new rate: {new_rps:.2f} req/sec"
+                        )
+                        await asyncio.sleep(backoff_delay)
+                        continue  # Retry same sequence
+                    else:
+                        # Other retry error - log and continue
+                        logger.error(f"Retry exhausted at {year}-{current_seq}: {e}")
+                        self.batch_logger.log(year, current_seq, 'error', str(e))
+                        self.rate_limiter.on_error()
+                        jobs_not_found += 1
+                        consecutive_not_found += 1
+
+                except Exception as e:
+                    # Catch-all for unexpected errors - log and continue
+                    logger.exception(f"Unexpected error at {year}-{current_seq}: {e}")
                     self.batch_logger.log(year, current_seq, 'error', str(e))
                     self.rate_limiter.on_error()
                     jobs_not_found += 1
