@@ -34,7 +34,13 @@ from src.mcf import (
     EmbeddingGenerator,
     EmbeddingStats,
 )
-from src.mcf.embeddings import FAISSIndexManager, IndexCompatibilityError
+from src.mcf.embeddings import (
+    FAISSIndexManager,
+    IndexCompatibilityError,
+    SemanticSearchEngine,
+    SearchRequest,
+    SearchResponse,
+)
 
 app = typer.Typer(
     name="mcf",
@@ -1934,6 +1940,142 @@ def upgrade_embeddings(
     table.add_row("Total time", elapsed_str)
 
     console.print(table)
+
+
+# Semantic search command
+
+
+@app.command(name="search-semantic")
+def semantic_search_cli(
+    query: str = typer.Argument(..., help="Search query"),
+    limit: int = typer.Option(10, "--limit", "-n", help="Number of results"),
+    salary_min: Optional[int] = typer.Option(None, "--salary-min", help="Minimum salary"),
+    salary_max: Optional[int] = typer.Option(None, "--salary-max", help="Maximum salary"),
+    company: Optional[str] = typer.Option(None, "--company", "-c", help="Filter by company"),
+    employment_type: Optional[str] = typer.Option(
+        None, "--employment-type", "-e", help="Filter by employment type"
+    ),
+    region: Optional[str] = typer.Option(None, "--region", "-r", help="Filter by region"),
+    alpha: float = typer.Option(
+        0.7, "--alpha", help="Semantic vs keyword weight (0=keyword, 1=semantic)"
+    ),
+    no_expand: bool = typer.Option(False, "--no-expand", help="Disable query expansion"),
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON"),
+    db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Database path"),
+    index_dir: str = typer.Option("data/embeddings", "--index-dir", help="FAISS index directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """
+    Semantic search for jobs.
+
+    Combines keyword matching with semantic similarity for better results
+    than plain text search. Requires embeddings to be generated first
+    (run 'embed-generate' if not done yet).
+
+    Examples:
+        mcf search-semantic "machine learning engineer"
+        mcf search-semantic "python developer" --salary-min 8000
+        mcf search-semantic "data scientist" --company Google
+        mcf search-semantic "ML" --no-expand
+        mcf search-semantic "AI engineer" --json
+    """
+    setup_logging(verbose)
+
+    engine = SemanticSearchEngine(db_path, Path(index_dir))
+
+    console.print("[dim]Loading search indexes...[/dim]")
+    try:
+        loaded = engine.load()
+    except Exception as e:
+        console.print(f"[red]Failed to load indexes: {e}[/red]")
+        console.print("[yellow]Run 'mcf embed-generate' first to build indexes.[/yellow]")
+        raise typer.Exit(1)
+
+    if not loaded:
+        console.print("[yellow]Running in degraded mode (keyword search only)[/yellow]")
+
+    request = SearchRequest(
+        query=query,
+        limit=limit,
+        salary_min=salary_min,
+        salary_max=salary_max,
+        company=company,
+        employment_type=employment_type,
+        region=region,
+        alpha=alpha,
+        expand_query=not no_expand,
+    )
+
+    response = engine.search(request)
+
+    if json_output:
+        _print_search_json(response, query)
+    else:
+        _display_search_results(response, query)
+
+
+def _print_search_json(response: SearchResponse, query: str) -> None:
+    """Print search results as JSON."""
+    import json
+    from dataclasses import asdict
+
+    data = asdict(response)
+    data["query"] = query
+
+    # Convert date objects to strings for JSON serialization
+    for result in data.get("results", []):
+        if result.get("posted_date"):
+            result["posted_date"] = str(result["posted_date"])
+
+    console.print(json.dumps(data, indent=2))
+
+
+def _display_search_results(response: SearchResponse, query: str) -> None:
+    """Display search results as a Rich table."""
+    console.print(f"\n[bold blue]Semantic Search Results[/bold blue]")
+    console.print("━" * 70)
+
+    # Query info
+    console.print(f"\nQuery: [green]{query}[/green]")
+    if response.query_expansion:
+        console.print(f"Expanded: [dim]{', '.join(response.query_expansion)}[/dim]")
+    console.print(f"Candidates: {response.total_candidates:,} jobs (after filters)")
+    console.print(f"Search time: [cyan]{response.search_time_ms:.0f}ms[/cyan]")
+
+    if response.degraded:
+        console.print("[yellow]⚠ Running in degraded mode (keyword search only)[/yellow]")
+
+    if response.cache_hit:
+        console.print("[dim]Cache hit[/dim]")
+
+    if not response.results:
+        console.print("\n[yellow]No results found. Try broadening your search.[/yellow]")
+        return
+
+    # Results table
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Score", justify="right", style="green", width=7)
+    table.add_column("Title", max_width=40)
+    table.add_column("Company", max_width=20)
+    table.add_column("Salary", justify="right", width=15)
+
+    for job in response.results:
+        salary = ""
+        if job.salary_min and job.salary_max:
+            salary = f"${job.salary_min:,}-${job.salary_max:,}"
+        elif job.salary_min:
+            salary = f"${job.salary_min:,}+"
+
+        table.add_row(
+            f"{job.similarity_score:.3f}",
+            job.title[:40],
+            (job.company_name[:20] if job.company_name else "N/A"),
+            salary,
+        )
+
+    console.print()
+    console.print(table)
+    console.print(f"\n[dim]Tip: Use --json for programmatic access[/dim]")
 
 
 if __name__ == "__main__":
