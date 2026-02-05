@@ -1,9 +1,10 @@
 """
-Embedding generation and indexing module for semantic search.
+Embedding generation, indexing, and semantic search module.
 
-Provides vector embeddings for jobs, skills, and companies using
-Sentence Transformers (all-MiniLM-L6-v2 model, 384 dimensions),
-plus FAISS index management for efficient similarity search.
+Provides:
+- Vector embeddings for jobs, skills, and companies (Sentence Transformers)
+- FAISS index management for efficient similarity search
+- SemanticSearchEngine for hybrid semantic + keyword search
 
 Features:
 - Lazy model loading (defers 2-3s load time until first use)
@@ -11,28 +12,38 @@ Features:
 - Skill clustering for query expansion
 - Company multi-centroid embeddings
 - FAISS index management (IVFFlat for jobs, Flat for skills/companies)
+- Hybrid scoring combining semantic and BM25 keyword search
+- Result caching and graceful degradation
 
 Example:
-    from src.mcf.embeddings import EmbeddingGenerator, EmbeddingStats, FAISSIndexManager
+    from src.mcf.embeddings import SemanticSearchEngine, SearchRequest
 
-    generator = EmbeddingGenerator()
+    # Create and load the search engine
+    engine = SemanticSearchEngine("data/mcf_jobs.db")
+    engine.load()
 
-    # Single job embedding
-    embedding = generator.generate_job_embedding(job)
+    # Perform semantic search
+    response = engine.search(SearchRequest(
+        query="machine learning engineer",
+        salary_min=10000,
+        limit=20
+    ))
 
-    # Batch generation with progress
-    def on_progress(stats: EmbeddingStats):
-        print(f"Progress: {stats.progress_pct:.1f}%")
-
-    stats = generator.generate_all(db, progress_callback=on_progress)
-
-    # Build FAISS index for search
-    manager = FAISSIndexManager()
-    manager.build_job_index(embeddings, uuids)
-    results = manager.search_jobs(query_vector, k=10)
+    for job in response.results:
+        print(f"{job.title} at {job.company_name}: {job.similarity_score:.3f}")
 """
 
-from .models import EmbeddingStats, SkillClusterResult
+from .models import (
+    EmbeddingStats,
+    SkillClusterResult,
+    SearchRequest,
+    SearchResponse,
+    JobResult,
+    SimilarJobsRequest,
+    SkillSearchRequest,
+    CompanySimilarityRequest,
+    CompanySimilarity,
+)
 from .generator import EmbeddingGenerator
 from .index_manager import (
     FAISSIndexManager,
@@ -40,13 +51,26 @@ from .index_manager import (
     IndexCompatibilityError,
 )
 from .query_expander import QueryExpander
+from .search_engine import SemanticSearchEngine
 
 __all__ = [
+    # Generator
     "EmbeddingGenerator",
     "EmbeddingStats",
     "SkillClusterResult",
+    # Index management
     "FAISSIndexManager",
     "IndexNotBuiltError",
     "IndexCompatibilityError",
+    # Query expansion
     "QueryExpander",
+    # Search engine
+    "SemanticSearchEngine",
+    "SearchRequest",
+    "SearchResponse",
+    "JobResult",
+    "SimilarJobsRequest",
+    "SkillSearchRequest",
+    "CompanySimilarityRequest",
+    "CompanySimilarity",
 ]

@@ -1,11 +1,13 @@
 """
-Pydantic models for embedding generation.
+Models for embedding generation and semantic search.
 
-Contains statistics and configuration models for the EmbeddingGenerator.
+Contains:
+- Statistics and configuration models for EmbeddingGenerator
+- Request/response models for SemanticSearchEngine
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 
@@ -96,3 +98,138 @@ class SkillClusterResult:
         if cluster_id is not None:
             return self.clusters.get(cluster_id, [])
         return []
+
+
+# =============================================================================
+# Semantic Search Request/Response Models
+# =============================================================================
+
+
+@dataclass
+class SearchRequest:
+    """
+    Request for semantic search.
+
+    Supports hybrid semantic + keyword search with filters.
+
+    Example:
+        request = SearchRequest(
+            query="machine learning engineer",
+            salary_min=10000,
+            employment_type="Full Time",
+            limit=20
+        )
+    """
+
+    query: str
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    employment_type: Optional[str] = None
+    company: Optional[str] = None
+    region: Optional[str] = None
+    limit: int = 20
+    min_similarity: float = 0.0
+    alpha: float = 0.7  # Weight for semantic vs keyword (1.0 = semantic only)
+    expand_query: bool = True
+    freshness_weight: float = 0.1  # Boost for recent postings
+
+    def cache_key(self) -> str:
+        """Generate a cache key for this request."""
+        parts = [
+            self.query,
+            str(self.salary_min),
+            str(self.salary_max),
+            str(self.employment_type),
+            str(self.company),
+            str(self.region),
+            str(self.limit),
+            str(self.min_similarity),
+            str(self.alpha),
+            str(self.expand_query),
+            str(self.freshness_weight),
+        ]
+        return "|".join(parts)
+
+
+@dataclass
+class JobResult:
+    """
+    Single job result from semantic search.
+
+    Contains job details plus relevance score.
+    """
+
+    uuid: str
+    title: str
+    company_name: str
+    description: str
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    employment_type: Optional[str] = None
+    skills: Optional[str] = None
+    location: Optional[str] = None
+    posted_date: Optional[date] = None
+    job_url: Optional[str] = None
+    similarity_score: float = 0.0
+
+
+@dataclass
+class SearchResponse:
+    """
+    Response from semantic search.
+
+    Contains results plus metadata about the search.
+    """
+
+    results: list[JobResult] = field(default_factory=list)
+    total_candidates: int = 0
+    search_time_ms: float = 0.0
+    query_expansion: Optional[list[str]] = None
+    degraded: bool = False  # True if fallback to keyword-only was used
+    cache_hit: bool = False
+
+
+@dataclass
+class SimilarJobsRequest:
+    """
+    Request to find jobs similar to a given job.
+    """
+
+    job_uuid: str
+    limit: int = 10
+    exclude_same_company: bool = True
+    freshness_weight: float = 0.1
+
+
+@dataclass
+class SkillSearchRequest:
+    """
+    Request to search jobs by skill similarity.
+    """
+
+    skill: str
+    limit: int = 20
+    min_similarity: float = 0.3
+
+
+@dataclass
+class CompanySimilarityRequest:
+    """
+    Request to find companies with similar job profiles.
+    """
+
+    company_name: str
+    limit: int = 10
+
+
+@dataclass
+class CompanySimilarity:
+    """
+    Company similarity result.
+    """
+
+    company_name: str
+    similarity_score: float
+    job_count: int = 0
+    avg_salary: Optional[int] = None
+    top_skills: list[str] = field(default_factory=list)
