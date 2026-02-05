@@ -6,14 +6,21 @@ Provides persistent storage with:
 - History tracking when jobs are updated
 - Scrape session tracking (replaces JSON checkpoints)
 - Query and export capabilities
+- Embedding storage for semantic search
+- FTS5 full-text search indexing
+- Search analytics tracking
 """
 
+import json
 import logging
 import sqlite3
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Iterator, Any
+
+import numpy as np
 
 from .models import Job, Checkpoint
 
@@ -133,6 +140,77 @@ CREATE TABLE IF NOT EXISTS daemon_state (
 INSERT OR IGNORE INTO daemon_state (id, status) VALUES (1, 'stopped');
 """
 
+# Schema for embeddings storage (semantic search)
+EMBEDDINGS_SCHEMA = """
+-- Embeddings table: stores vector embeddings for jobs, skills, companies
+CREATE TABLE IF NOT EXISTS embeddings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id TEXT NOT NULL,           -- UUID for jobs, name for skills/companies
+    entity_type TEXT NOT NULL,         -- 'job', 'skill', 'company'
+    embedding_blob BLOB NOT NULL,      -- Serialized numpy array (384 × 4 = 1536 bytes)
+    model_version TEXT DEFAULT 'all-MiniLM-L6-v2',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(entity_id, entity_type)
+);
+
+CREATE INDEX IF NOT EXISTS idx_embeddings_entity ON embeddings(entity_id, entity_type);
+CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(entity_type);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model_version);
+"""
+
+# Schema for FTS5 full-text search (external content table)
+FTS5_SCHEMA = """
+-- FTS5 virtual table for full-text search on jobs
+-- Uses external content from jobs table (no data duplication)
+CREATE VIRTUAL TABLE IF NOT EXISTS jobs_fts USING fts5(
+    uuid,
+    title,
+    description,
+    skills,
+    company_name,
+    content='jobs',
+    content_rowid='id'
+);
+
+-- Triggers to keep FTS in sync with jobs table
+CREATE TRIGGER IF NOT EXISTS jobs_ai AFTER INSERT ON jobs BEGIN
+    INSERT INTO jobs_fts(rowid, uuid, title, description, skills, company_name)
+    VALUES (new.id, new.uuid, new.title, new.description, new.skills, new.company_name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS jobs_ad AFTER DELETE ON jobs BEGIN
+    INSERT INTO jobs_fts(jobs_fts, rowid, uuid, title, description, skills, company_name)
+    VALUES ('delete', old.id, old.uuid, old.title, old.description, old.skills, old.company_name);
+END;
+
+CREATE TRIGGER IF NOT EXISTS jobs_au AFTER UPDATE ON jobs BEGIN
+    INSERT INTO jobs_fts(jobs_fts, rowid, uuid, title, description, skills, company_name)
+    VALUES ('delete', old.id, old.uuid, old.title, old.description, old.skills, old.company_name);
+    INSERT INTO jobs_fts(rowid, uuid, title, description, skills, company_name)
+    VALUES (new.id, new.uuid, new.title, new.description, new.skills, new.company_name);
+END;
+"""
+
+# Schema for search analytics tracking
+ANALYTICS_SCHEMA = """
+-- Search analytics: tracks queries for monitoring and optimization
+CREATE TABLE IF NOT EXISTS search_analytics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    query_type TEXT DEFAULT 'semantic',  -- 'semantic', 'keyword', 'hybrid'
+    result_count INTEGER,
+    latency_ms REAL,
+    cache_hit BOOLEAN DEFAULT FALSE,
+    degraded BOOLEAN DEFAULT FALSE,      -- True if fallback was used
+    filters_used TEXT,                   -- JSON of applied filters
+    searched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_analytics_time ON search_analytics(searched_at);
+CREATE INDEX IF NOT EXISTS idx_analytics_query ON search_analytics(query);
+"""
+
 
 class MCFDatabase:
     """
@@ -173,10 +251,92 @@ class MCFDatabase:
             conn.close()
 
     def _ensure_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """Create tables and run migrations."""
         with self._connection() as conn:
+            # Core schema (jobs, history, sessions, etc.)
             conn.executescript(SCHEMA_SQL)
+
+            # Embeddings table
+            conn.executescript(EMBEDDINGS_SCHEMA)
+
+            # Search analytics table
+            conn.executescript(ANALYTICS_SCHEMA)
+
+        # Run migrations for schema changes to existing tables
+        self._migrate_salary_annual()
+
+        # FTS5 requires special handling (check if table exists first)
+        self._ensure_fts5()
+
         logger.debug(f"Database schema ensured at {self.db_path}")
+
+    def _migrate_salary_annual(self) -> None:
+        """
+        Add salary_annual columns if they don't exist.
+
+        This handles the ALTER TABLE gracefully for existing databases.
+        Normalizes all salaries to annual for consistent comparisons.
+        """
+        with self._connection() as conn:
+            # Check if columns exist
+            cursor = conn.execute("PRAGMA table_info(jobs)")
+            columns = {row[1] for row in cursor.fetchall()}
+
+            if "salary_annual_min" not in columns:
+                logger.info("Adding salary_annual columns to jobs table...")
+                conn.execute("ALTER TABLE jobs ADD COLUMN salary_annual_min INTEGER")
+                conn.execute("ALTER TABLE jobs ADD COLUMN salary_annual_max INTEGER")
+
+                # Populate for existing rows based on salary_type
+                conn.execute("""
+                    UPDATE jobs SET
+                        salary_annual_min = CASE salary_type
+                            WHEN 'Monthly' THEN salary_min * 12
+                            WHEN 'Yearly' THEN salary_min
+                            WHEN 'Hourly' THEN salary_min * 2080
+                            WHEN 'Daily' THEN salary_min * 260
+                            ELSE salary_min * 12  -- Assume monthly as default
+                        END,
+                        salary_annual_max = CASE salary_type
+                            WHEN 'Monthly' THEN salary_max * 12
+                            WHEN 'Yearly' THEN salary_max
+                            WHEN 'Hourly' THEN salary_max * 2080
+                            WHEN 'Daily' THEN salary_max * 260
+                            ELSE salary_max * 12
+                        END
+                    WHERE salary_min IS NOT NULL OR salary_max IS NOT NULL
+                """)
+                conn.commit()
+                logger.info("Salary annual migration complete")
+
+    def _ensure_fts5(self) -> None:
+        """
+        Set up FTS5 virtual table and triggers.
+
+        FTS5 tables need special handling because:
+        1. They can't be created with IF NOT EXISTS in all cases
+        2. Triggers need to be created separately
+        3. Existing data needs to be indexed on first setup
+        """
+        with self._connection() as conn:
+            # Check if FTS table exists
+            fts_exists = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name='jobs_fts'
+            """).fetchone()
+
+            if not fts_exists:
+                logger.info("Creating FTS5 index for jobs...")
+                conn.executescript(FTS5_SCHEMA)
+
+                # Populate FTS5 with existing jobs data
+                jobs_count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+                if jobs_count > 0:
+                    logger.info(f"Rebuilding FTS5 index for {jobs_count} jobs...")
+                    conn.execute("INSERT INTO jobs_fts(jobs_fts) VALUES('rebuild')")
+
+                conn.commit()
+                logger.info("FTS5 index created")
 
     def upsert_job(self, job: Job) -> tuple[bool, bool]:
         """
@@ -226,6 +386,14 @@ class MCFDatabase:
         self, conn: sqlite3.Connection, job_data: dict, timestamp: str
     ) -> None:
         """Insert a new job record."""
+        # Calculate annual salary for consistent comparisons
+        data = {**job_data, "first_seen_at": timestamp, "last_updated_at": timestamp}
+        data["salary_annual_min"], data["salary_annual_max"] = self._calculate_annual_salary(
+            job_data.get("salary_min"),
+            job_data.get("salary_max"),
+            job_data.get("salary_type"),
+        )
+
         conn.execute(
             """
             INSERT INTO jobs (
@@ -233,22 +401,32 @@ class MCFDatabase:
                 salary_min, salary_max, salary_type, employment_type,
                 seniority, min_experience_years, skills, categories,
                 location, district, region, posted_date, expiry_date,
-                applications_count, job_url, first_seen_at, last_updated_at
+                applications_count, job_url, first_seen_at, last_updated_at,
+                salary_annual_min, salary_annual_max
             ) VALUES (
                 :uuid, :title, :company_name, :company_uen, :description,
                 :salary_min, :salary_max, :salary_type, :employment_type,
                 :seniority, :min_experience_years, :skills, :categories,
                 :location, :district, :region, :posted_date, :expiry_date,
-                :applications_count, :job_url, :first_seen_at, :last_updated_at
+                :applications_count, :job_url, :first_seen_at, :last_updated_at,
+                :salary_annual_min, :salary_annual_max
             )
             """,
-            {**job_data, "first_seen_at": timestamp, "last_updated_at": timestamp},
+            data,
         )
 
     def _update_job(
         self, conn: sqlite3.Connection, job_data: dict, timestamp: str
     ) -> None:
         """Update an existing job record."""
+        # Calculate annual salary for consistent comparisons
+        data = {**job_data, "last_updated_at": timestamp}
+        data["salary_annual_min"], data["salary_annual_max"] = self._calculate_annual_salary(
+            job_data.get("salary_min"),
+            job_data.get("salary_max"),
+            job_data.get("salary_type"),
+        )
+
         conn.execute(
             """
             UPDATE jobs SET
@@ -271,11 +449,47 @@ class MCFDatabase:
                 expiry_date = :expiry_date,
                 applications_count = :applications_count,
                 job_url = :job_url,
-                last_updated_at = :last_updated_at
+                last_updated_at = :last_updated_at,
+                salary_annual_min = :salary_annual_min,
+                salary_annual_max = :salary_annual_max
             WHERE uuid = :uuid
             """,
-            {**job_data, "last_updated_at": timestamp},
+            data,
         )
+
+    @staticmethod
+    def _calculate_annual_salary(
+        salary_min: int | None,
+        salary_max: int | None,
+        salary_type: str | None,
+    ) -> tuple[int | None, int | None]:
+        """
+        Convert salary to annual equivalent.
+
+        Args:
+            salary_min: Minimum salary in original units
+            salary_max: Maximum salary in original units
+            salary_type: 'Monthly', 'Yearly', 'Hourly', or 'Daily'
+
+        Returns:
+            Tuple of (annual_min, annual_max)
+        """
+        if salary_min is None and salary_max is None:
+            return None, None
+
+        # Conversion factors to annual
+        multipliers = {
+            "Monthly": 12,
+            "Yearly": 1,
+            "Hourly": 2080,  # 40 hours × 52 weeks
+            "Daily": 260,   # 5 days × 52 weeks
+        }
+        multiplier = multipliers.get(salary_type, 12)  # Default to monthly
+
+        annual_min = int(salary_min * multiplier) if salary_min else None
+        annual_max = int(salary_max * multiplier) if salary_max else None
+
+        return annual_min, annual_max
 
     def _save_to_history(self, conn: sqlite3.Connection, existing: sqlite3.Row) -> None:
         """Save current job state to history table."""
@@ -1152,3 +1366,536 @@ class MCFDatabase:
                 WHERE id = 1
                 """
             )
+
+    # =========================================================================
+    # Embedding Methods (Semantic Search)
+    # =========================================================================
+
+    def upsert_embedding(
+        self,
+        entity_id: str,
+        entity_type: str,
+        embedding: np.ndarray,
+        model_version: str | None = None,
+    ) -> None:
+        """
+        Insert or update an embedding.
+
+        Args:
+            entity_id: UUID for jobs, name for skills/companies
+            entity_type: 'job', 'skill', or 'company'
+            embedding: numpy array of shape (384,) for MiniLM
+            model_version: Model used to generate embedding
+        """
+        blob = embedding.astype(np.float32).tobytes()
+        model = model_version or "all-MiniLM-L6-v2"
+
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO embeddings (entity_id, entity_type, embedding_blob, model_version, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(entity_id, entity_type) DO UPDATE SET
+                    embedding_blob = excluded.embedding_blob,
+                    model_version = excluded.model_version,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (entity_id, entity_type, blob, model),
+            )
+
+    def get_embedding(self, entity_id: str, entity_type: str) -> Optional[np.ndarray]:
+        """
+        Retrieve embedding as numpy array.
+
+        Args:
+            entity_id: Entity identifier
+            entity_type: Type of entity ('job', 'skill', 'company')
+
+        Returns:
+            Embedding array or None if not found
+        """
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT embedding_blob FROM embeddings WHERE entity_id = ? AND entity_type = ?",
+                (entity_id, entity_type),
+            ).fetchone()
+
+        if row:
+            return np.frombuffer(row[0], dtype=np.float32)
+        return None
+
+    def get_all_embeddings(self, entity_type: str) -> tuple[list[str], np.ndarray]:
+        """
+        Get all embeddings of a type as (IDs, stacked array).
+
+        Useful for batch similarity calculations.
+
+        Args:
+            entity_type: 'job', 'skill', or 'company'
+
+        Returns:
+            Tuple of (entity_ids, embeddings_matrix)
+            embeddings_matrix has shape (n_entities, embedding_dim)
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT entity_id, embedding_blob FROM embeddings WHERE entity_type = ? ORDER BY id",
+                (entity_type,),
+            ).fetchall()
+
+        if not rows:
+            return [], np.array([])
+
+        ids = [row[0] for row in rows]
+        embeddings = np.array([np.frombuffer(row[1], dtype=np.float32) for row in rows])
+        return ids, embeddings
+
+    def get_embeddings_for_uuids(self, uuids: list[str]) -> dict[str, np.ndarray]:
+        """
+        Get embeddings for specific job UUIDs.
+
+        Args:
+            uuids: List of job UUIDs
+
+        Returns:
+            Dict mapping uuid -> embedding array
+        """
+        if not uuids:
+            return {}
+
+        placeholders = ",".join("?" * len(uuids))
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT entity_id, embedding_blob FROM embeddings "
+                f"WHERE entity_type = 'job' AND entity_id IN ({placeholders})",
+                uuids,
+            ).fetchall()
+
+        return {row[0]: np.frombuffer(row[1], dtype=np.float32) for row in rows}
+
+    def get_embedding_stats(self) -> dict:
+        """
+        Get embedding statistics including coverage.
+
+        Returns:
+            Dict with counts by type, coverage percentage, model version
+        """
+        with self._connection() as conn:
+            # Count by type
+            type_counts = {}
+            for row in conn.execute(
+                "SELECT entity_type, COUNT(*) FROM embeddings GROUP BY entity_type"
+            ):
+                type_counts[row[0]] = row[1]
+
+            # Job coverage
+            total_jobs = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+            jobs_with_embeddings = type_counts.get("job", 0)
+
+            # Model version
+            model = conn.execute(
+                "SELECT model_version FROM embeddings LIMIT 1"
+            ).fetchone()
+
+        return {
+            "job_embeddings": type_counts.get("job", 0),
+            "skill_embeddings": type_counts.get("skill", 0),
+            "company_embeddings": type_counts.get("company", 0),
+            "total_jobs": total_jobs,
+            "coverage_pct": (jobs_with_embeddings / total_jobs * 100)
+            if total_jobs > 0
+            else 0,
+            "model_version": model[0] if model else None,
+        }
+
+    def delete_embeddings_for_model(self, model_version: str) -> int:
+        """
+        Delete embeddings for a specific model version.
+
+        Useful when upgrading to a new embedding model.
+
+        Args:
+            model_version: Model version to delete
+
+        Returns:
+            Number of embeddings deleted
+        """
+        with self._connection() as conn:
+            cursor = conn.execute(
+                "DELETE FROM embeddings WHERE model_version = ?",
+                (model_version,),
+            )
+            return cursor.rowcount
+
+    def batch_upsert_embeddings(
+        self,
+        entity_ids: list[str],
+        entity_type: str,
+        embeddings: np.ndarray,
+        model_version: str | None = None,
+    ) -> int:
+        """
+        Batch insert or update embeddings efficiently.
+
+        Args:
+            entity_ids: List of entity identifiers
+            entity_type: Type of entities
+            embeddings: Matrix of shape (n_entities, embedding_dim)
+            model_version: Model used
+
+        Returns:
+            Number of embeddings upserted
+        """
+        if len(entity_ids) != len(embeddings):
+            raise ValueError("entity_ids and embeddings must have same length")
+
+        model = model_version or "all-MiniLM-L6-v2"
+        data = [
+            (eid, entity_type, emb.astype(np.float32).tobytes(), model)
+            for eid, emb in zip(entity_ids, embeddings)
+        ]
+
+        with self._connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO embeddings (entity_id, entity_type, embedding_blob, model_version, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(entity_id, entity_type) DO UPDATE SET
+                    embedding_blob = excluded.embedding_blob,
+                    model_version = excluded.model_version,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                data,
+            )
+            return len(data)
+
+    # =========================================================================
+    # FTS5 Full-Text Search Methods
+    # =========================================================================
+
+    def bm25_search(self, query: str, limit: int = 100) -> list[tuple[str, float]]:
+        """
+        Full-text search using BM25 ranking.
+
+        Args:
+            query: Search query (supports FTS5 query syntax)
+            limit: Maximum results to return
+
+        Returns:
+            List of (uuid, bm25_score) tuples, sorted by relevance.
+            Lower scores = more relevant (BM25 returns negative scores).
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT uuid, bm25(jobs_fts) as score
+                FROM jobs_fts
+                WHERE jobs_fts MATCH ?
+                ORDER BY score
+                LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+
+        return [(row[0], row[1]) for row in rows]
+
+    def rebuild_fts_index(self) -> None:
+        """
+        Rebuild FTS index from jobs table.
+
+        Use this to recover from corruption or after bulk data changes.
+        """
+        with self._connection() as conn:
+            conn.execute("INSERT INTO jobs_fts(jobs_fts) VALUES('rebuild')")
+            conn.commit()
+        logger.info("FTS5 index rebuilt")
+
+    # =========================================================================
+    # Search Analytics Methods
+    # =========================================================================
+
+    def log_search(
+        self,
+        query: str,
+        query_type: str,
+        result_count: int,
+        latency_ms: float,
+        cache_hit: bool = False,
+        degraded: bool = False,
+        filters_used: dict | None = None,
+    ) -> None:
+        """
+        Log a search query for analytics.
+
+        Args:
+            query: Search query string
+            query_type: 'semantic', 'keyword', or 'hybrid'
+            result_count: Number of results returned
+            latency_ms: Query execution time in milliseconds
+            cache_hit: Whether result came from cache
+            degraded: Whether fallback was used
+            filters_used: Dict of applied filters
+        """
+        filters_json = json.dumps(filters_used) if filters_used else None
+
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO search_analytics
+                (query, query_type, result_count, latency_ms, cache_hit, degraded, filters_used)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (query, query_type, result_count, latency_ms, cache_hit, degraded, filters_json),
+            )
+
+    def get_popular_queries(self, days: int = 7, limit: int = 20) -> list[dict]:
+        """
+        Get most popular search queries in the last N days.
+
+        Args:
+            days: Number of days to look back
+            limit: Maximum queries to return
+
+        Returns:
+            List of dicts with query, count, avg_latency_ms
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT query, COUNT(*) as count, AVG(latency_ms) as avg_latency
+                FROM search_analytics
+                WHERE searched_at > datetime('now', ?)
+                GROUP BY query
+                ORDER BY count DESC
+                LIMIT ?
+                """,
+                (f"-{days} days", limit),
+            ).fetchall()
+
+        return [
+            {"query": r[0], "count": r[1], "avg_latency_ms": r[2]}
+            for r in rows
+        ]
+
+    def get_search_latency_percentiles(self, days: int = 7) -> dict:
+        """
+        Get p50, p90, p95, p99 latency statistics.
+
+        Args:
+            days: Number of days to analyze
+
+        Returns:
+            Dict with percentile values and total count
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT latency_ms FROM search_analytics
+                WHERE searched_at > datetime('now', ?)
+                ORDER BY latency_ms
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+
+        if not rows:
+            return {"p50": 0, "p90": 0, "p95": 0, "p99": 0, "count": 0}
+
+        latencies = [r[0] for r in rows]
+        n = len(latencies)
+
+        return {
+            "p50": latencies[int(n * 0.5)],
+            "p90": latencies[int(n * 0.9)],
+            "p95": latencies[int(n * 0.95)],
+            "p99": latencies[min(int(n * 0.99), n - 1)],
+            "count": n,
+        }
+
+    def get_analytics_summary(self, days: int = 7) -> dict:
+        """
+        Get summary of search analytics.
+
+        Args:
+            days: Number of days to analyze
+
+        Returns:
+            Dict with total searches, cache hit rate, degraded rate, by type
+        """
+        with self._connection() as conn:
+            # Total and by type
+            rows = conn.execute(
+                """
+                SELECT query_type, COUNT(*) as count,
+                       SUM(CASE WHEN cache_hit THEN 1 ELSE 0 END) as cache_hits,
+                       SUM(CASE WHEN degraded THEN 1 ELSE 0 END) as degraded_count
+                FROM search_analytics
+                WHERE searched_at > datetime('now', ?)
+                GROUP BY query_type
+                """,
+                (f"-{days} days",),
+            ).fetchall()
+
+        by_type = {}
+        total = 0
+        total_cache_hits = 0
+        total_degraded = 0
+
+        for r in rows:
+            by_type[r[0]] = {"count": r[1], "cache_hits": r[2], "degraded": r[3]}
+            total += r[1]
+            total_cache_hits += r[2]
+            total_degraded += r[3]
+
+        return {
+            "total_searches": total,
+            "cache_hit_rate": (total_cache_hits / total * 100) if total > 0 else 0,
+            "degraded_rate": (total_degraded / total * 100) if total > 0 else 0,
+            "by_type": by_type,
+        }
+
+    # =========================================================================
+    # Company and Skills Methods (for semantic search features)
+    # =========================================================================
+
+    def get_company_stats(self, company_name: str) -> dict:
+        """
+        Get statistics for a company.
+
+        Used by similar companies endpoint.
+
+        Args:
+            company_name: Company name to look up
+
+        Returns:
+            Dict with job_count, avg_salary, top_skills
+        """
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as job_count,
+                    AVG(salary_annual_min) as avg_salary_min,
+                    AVG(salary_annual_max) as avg_salary_max
+                FROM jobs
+                WHERE company_name = ?
+                """,
+                (company_name,),
+            ).fetchone()
+
+            # Get skills for this company
+            skills_rows = conn.execute(
+                "SELECT skills FROM jobs WHERE company_name = ? AND skills IS NOT NULL",
+                (company_name,),
+            ).fetchall()
+
+        # Parse and count skills
+        skill_counts: Counter = Counter()
+        for r in skills_rows:
+            skills = [s.strip() for s in r[0].split(",") if s.strip()]
+            skill_counts.update(skills)
+
+        top_skills = [s for s, _ in skill_counts.most_common(10)]
+
+        avg_salary = None
+        if row[1] and row[2]:
+            avg_salary = int((row[1] + row[2]) / 2)
+
+        return {
+            "job_count": row[0],
+            "avg_salary": avg_salary,
+            "top_skills": top_skills,
+        }
+
+    def get_all_unique_skills(self) -> list[str]:
+        """
+        Extract all unique skills from job postings.
+
+        Returns:
+            Sorted list of unique skill names
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT skills FROM jobs WHERE skills IS NOT NULL AND skills != ''"
+            ).fetchall()
+
+        skills_set: set[str] = set()
+        for row in rows:
+            skills = [s.strip() for s in row[0].split(",")]
+            skills_set.update(s for s in skills if s)
+
+        return sorted(list(skills_set))
+
+    def get_skill_frequencies(
+        self, min_jobs: int = 1, limit: int = 100
+    ) -> list[tuple[str, int]]:
+        """
+        Get skill frequencies for visualization.
+
+        Args:
+            min_jobs: Minimum jobs a skill must appear in
+            limit: Maximum skills to return
+
+        Returns:
+            List of (skill_name, count) tuples, sorted by frequency descending
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT skills FROM jobs WHERE skills IS NOT NULL AND skills != ''"
+            ).fetchall()
+
+        skill_counts: Counter = Counter()
+        for row in rows:
+            skills = [s.strip() for s in row[0].split(",")]
+            skill_counts.update(s for s in skills if s)
+
+        filtered = [
+            (skill, count)
+            for skill, count in skill_counts.items()
+            if count >= min_jobs
+        ]
+        filtered.sort(key=lambda x: x[1], reverse=True)
+
+        return filtered[:limit]
+
+    def get_all_unique_companies(self) -> list[str]:
+        """
+        Get all unique company names.
+
+        Returns:
+            Sorted list of company names
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT company_name FROM jobs
+                WHERE company_name IS NOT NULL AND company_name != ''
+                """
+            ).fetchall()
+
+        return sorted([row[0] for row in rows])
+
+    def get_jobs_without_embeddings(self, limit: int = 1000) -> list[dict]:
+        """
+        Get jobs that don't have embeddings yet.
+
+        Useful for batch embedding generation.
+
+        Args:
+            limit: Maximum jobs to return
+
+        Returns:
+            List of job dicts with uuid, title, description, skills
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT j.uuid, j.title, j.description, j.skills, j.company_name
+                FROM jobs j
+                LEFT JOIN embeddings e ON j.uuid = e.entity_id AND e.entity_type = 'job'
+                WHERE e.id IS NULL
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+        return [dict(row) for row in rows]
