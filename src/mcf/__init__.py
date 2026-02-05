@@ -25,6 +25,7 @@ from .historical_scraper import HistoricalScraper, ScrapeProgress, YEAR_ESTIMATE
 from .batch_logger import BatchLogger
 from .adaptive_rate import AdaptiveRateLimiter, RateState
 from .daemon import ScraperDaemon, DaemonError, DaemonAlreadyRunning, DaemonNotRunning
+from .embeddings import EmbeddingGenerator, EmbeddingStats, SkillClusterResult
 
 __all__ = [
     # Core models
@@ -53,5 +54,9 @@ __all__ = [
     "DaemonError",
     "DaemonAlreadyRunning",
     "DaemonNotRunning",
+    # Embeddings
+    "EmbeddingGenerator",
+    "EmbeddingStats",
+    "SkillClusterResult",
 ]
 __version__ = "1.4.0"
