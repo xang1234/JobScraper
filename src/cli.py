@@ -34,6 +34,7 @@ from src.mcf import (
     EmbeddingGenerator,
     EmbeddingStats,
 )
+from src.mcf.embeddings import FAISSIndexManager, IndexCompatibilityError
 
 app = typer.Typer(
     name="mcf",
@@ -1359,19 +1360,28 @@ def generate_embeddings(
         "--skip-existing/--no-skip-existing",
         help="Skip jobs that already have embeddings",
     ),
+    build_index: bool = typer.Option(
+        True,
+        "--build-index/--no-build-index",
+        help="Build FAISS indexes after embedding generation",
+    ),
+    index_dir: str = typer.Option(
+        "data/embeddings", "--index-dir", help="Directory for FAISS index files"
+    ),
     db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
     """
-    Generate embeddings for all jobs in the database.
+    Generate embeddings for all jobs and build FAISS indexes.
 
-    This preprocesses all jobs to create semantic embeddings for similarity search.
-    Run this once after initial data load, then use embed-sync for updates.
+    This preprocesses all jobs to create semantic embeddings for similarity search,
+    then builds FAISS indexes for efficient nearest-neighbor lookup.
 
     Examples:
         mcf embed-generate
         mcf embed-generate --batch-size 64
         mcf embed-generate --no-skip-existing  # Regenerate all
+        mcf embed-generate --no-build-index    # Skip index building
     """
     setup_logging(verbose)
 
@@ -1391,6 +1401,11 @@ def generate_embeddings(
         total_jobs = len(jobs_to_process)
         if total_jobs == 0:
             console.print("[green]✓ All jobs already have embeddings![/green]")
+            # Still build index if requested and we have embeddings
+            if build_index:
+                emb_stats = db.get_embedding_stats()
+                if emb_stats["job_embeddings"] > 0:
+                    _build_faiss_indexes(db, generator, index_dir, console)
             return
         console.print(f"Jobs to process: [cyan]{total_jobs:,}[/cyan] (skipping existing)")
     else:
@@ -1399,7 +1414,9 @@ def generate_embeddings(
 
     console.print()
 
-    # Run with progress bar
+    # Phase 1: Generate embeddings
+    console.print("[bold]Phase 1: Generating Embeddings[/bold]\n")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -1425,10 +1442,10 @@ def generate_embeddings(
             progress_callback=on_progress,
         )
 
-    # Print summary
+    # Print embedding summary
     console.print("\n[bold green]✓ Embedding generation complete![/bold green]\n")
 
-    table = Table(title="Summary", show_header=False)
+    table = Table(title="Embedding Summary", show_header=False)
     table.add_column("Metric", style="cyan")
     table.add_column("Value", justify="right")
 
@@ -1451,24 +1468,121 @@ def generate_embeddings(
 
     console.print(table)
 
+    # Phase 2: Build FAISS indexes
+    if not build_index:
+        console.print("\n[yellow]Skipping index building (--no-build-index)[/yellow]")
+        return
+
+    _build_faiss_indexes(db, generator, index_dir, console)
+
+
+def _build_faiss_indexes(
+    db: MCFDatabase,
+    generator: EmbeddingGenerator,
+    index_dir: str,
+    console: Console,
+) -> None:
+    """Build FAISS indexes from embeddings in database."""
+    import numpy as np
+
+    console.print("\n[bold]Phase 2: Building FAISS Indexes[/bold]\n")
+
+    index_path = Path(index_dir)
+    index_manager = FAISSIndexManager(
+        index_dir=index_path,
+        model_version=generator.model_name,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+    ) as progress:
+        # Load job embeddings from database
+        task = progress.add_task("Loading job embeddings from database...", total=None)
+        job_uuids, job_embeddings = db.get_all_embeddings("job")
+
+        if len(job_uuids) == 0:
+            progress.update(task, description="[yellow]No job embeddings found[/yellow]")
+            console.print("\n[yellow]No job embeddings found. Run embed-generate first.[/yellow]")
+            return
+
+        # Build job index
+        progress.update(task, description=f"Building job index ({len(job_uuids):,} vectors)...")
+        index_manager.build_job_index(job_embeddings, job_uuids)
+
+        # Load and build skill index
+        progress.update(task, description="Loading skill embeddings...")
+        skill_names, skill_embeddings = db.get_all_embeddings("skill")
+
+        if len(skill_names) > 0:
+            progress.update(task, description=f"Building skill index ({len(skill_names):,} skills)...")
+            index_manager.build_skill_index(skill_embeddings, skill_names)
+
+        # Save indexes to disk
+        progress.update(task, description="Saving indexes to disk...")
+        index_manager.save()
+
+        progress.update(task, description="[green]✓ Complete[/green]")
+
+    # Print index summary
+    console.print("\n[bold green]✓ FAISS indexes built![/bold green]\n")
+
+    index_stats = index_manager.get_stats()
+    table = Table(title="Index Summary", show_header=True)
+    table.add_column("Index", style="cyan")
+    table.add_column("Vectors", justify="right")
+    table.add_column("Memory", justify="right")
+    table.add_column("Type")
+
+    if "jobs" in index_stats["indexes"]:
+        job_idx = index_stats["indexes"]["jobs"]
+        table.add_row(
+            "jobs.index",
+            f"{job_idx['total_vectors']:,}",
+            f"{job_idx['estimated_memory_mb']:.1f} MB",
+            job_idx["index_type"],
+        )
+
+    if "skills" in index_stats["indexes"]:
+        skill_idx = index_stats["indexes"]["skills"]
+        table.add_row(
+            "skills.index",
+            f"{skill_idx['total_skills']:,}",
+            "-",
+            skill_idx["index_type"],
+        )
+
+    console.print(table)
+    console.print(f"\nIndexes saved to: [cyan]{index_dir}[/cyan]")
+
 
 @app.command(name="embed-sync")
 def sync_embeddings(
     batch_size: int = typer.Option(
         32, "--batch-size", "-b", help="Jobs to process in each batch"
     ),
+    update_index: bool = typer.Option(
+        True,
+        "--update-index/--no-update-index",
+        help="Update FAISS indexes with new embeddings",
+    ),
+    index_dir: str = typer.Option(
+        "data/embeddings", "--index-dir", help="Directory for FAISS index files"
+    ),
     db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
     """
-    Generate embeddings for new jobs (incremental update).
+    Generate embeddings for new jobs and update indexes.
 
-    Only processes jobs that don't have embeddings yet.
-    Run this after each scrape to keep embeddings up-to-date.
+    Only processes jobs that don't have embeddings yet, then adds
+    them to existing FAISS indexes for incremental updates.
 
     Examples:
         mcf embed-sync
         mcf scrape "data scientist" && mcf embed-sync  # Chain commands
+        mcf embed-sync --no-update-index  # Skip index update
     """
     setup_logging(verbose)
 
@@ -1488,6 +1602,9 @@ def sync_embeddings(
 
     console.print(f"New jobs to embed: [cyan]{total_new:,}[/cyan]")
     console.print()
+
+    # Collect new UUIDs for index update
+    new_uuids = [job["uuid"] for job in jobs_to_process]
 
     # Run with progress bar
     with Progress(
@@ -1512,15 +1629,75 @@ def sync_embeddings(
 
     console.print(f"\n[green]✓ Synced {stats.jobs_processed:,} jobs in {stats.elapsed_seconds:.1f}s[/green]")
 
+    # Update FAISS index if requested
+    if not update_index:
+        console.print("[yellow]Skipping index update (--no-update-index)[/yellow]")
+        return
+
+    _update_faiss_index(db, generator, index_dir, new_uuids, console)
+
+
+def _update_faiss_index(
+    db: MCFDatabase,
+    generator: EmbeddingGenerator,
+    index_dir: str,
+    new_uuids: list[str],
+    console: Console,
+) -> None:
+    """Add new embeddings to existing FAISS index."""
+    import numpy as np
+
+    index_path = Path(index_dir)
+    index_manager = FAISSIndexManager(
+        index_dir=index_path,
+        model_version=generator.model_name,
+    )
+
+    # Try to load existing index
+    if not index_manager.exists():
+        console.print("\n[yellow]No existing FAISS index found.[/yellow]")
+        console.print("Run [bold]mcf embed-generate[/bold] to build indexes.")
+        return
+
+    console.print("\n[bold]Updating FAISS Index[/bold]")
+
+    try:
+        index_manager.load()
+    except IndexCompatibilityError as e:
+        console.print(f"\n[red]Index compatibility error: {e}[/red]")
+        console.print("Run [bold]mcf embed-generate --no-skip-existing[/bold] to rebuild.")
+        return
+
+    # Get embeddings for new jobs
+    embeddings_dict = db.get_embeddings_for_uuids(new_uuids)
+
+    if not embeddings_dict:
+        console.print("[yellow]No new embeddings to add to index[/yellow]")
+        return
+
+    # Prepare arrays for add_jobs
+    uuids = list(embeddings_dict.keys())
+    embeddings = np.array([embeddings_dict[uuid] for uuid in uuids], dtype=np.float32)
+
+    # Add to index
+    index_manager.add_jobs(embeddings, uuids)
+    index_manager.save()
+
+    console.print(f"[green]✓ Added {len(uuids):,} jobs to FAISS index[/green]")
+    console.print(f"Total jobs in index: [cyan]{index_manager.indexes['jobs'].ntotal:,}[/cyan]")
+
 
 @app.command(name="embed-status")
 def embedding_status(
+    index_dir: str = typer.Option(
+        "data/embeddings", "--index-dir", help="Directory for FAISS index files"
+    ),
     db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
 ) -> None:
     """
-    Show embedding generation status and coverage.
+    Show embedding and FAISS index status.
 
-    Displays statistics about embeddings in the database.
+    Displays statistics about embeddings in the database and FAISS indexes on disk.
 
     Example:
         mcf embed-status
@@ -1552,10 +1729,64 @@ def embedding_status(
         console.print("\n[bold]Companies:[/bold]")
         console.print(f"  With embeddings:       {stats['company_embeddings']:,}")
 
-    # Check for cluster files
-    from pathlib import Path
+    # FAISS Index section
+    console.print("\n[bold]FAISS Indexes:[/bold]")
 
-    cluster_dir = Path("data/embeddings")
+    index_path = Path(index_dir)
+    index_manager = FAISSIndexManager(
+        index_dir=index_path,
+        model_version=stats.get("model_version") or "all-MiniLM-L6-v2",
+    )
+
+    if index_manager.exists():
+        try:
+            index_manager.load()
+            index_stats = index_manager.get_stats()
+
+            table = Table(show_header=True, box=None)
+            table.add_column("Index", style="cyan")
+            table.add_column("Vectors", justify="right")
+            table.add_column("Memory", justify="right")
+            table.add_column("Status")
+
+            # Job index
+            if "jobs" in index_stats["indexes"]:
+                job_idx = index_stats["indexes"]["jobs"]
+                mem_str = f"{job_idx['estimated_memory_mb']:.1f} MB"
+                # Check if index is in sync with embeddings
+                in_sync = job_idx["total_vectors"] == stats["job_embeddings"]
+                status = "[green]✓ ready[/green]" if in_sync else f"[yellow]⚠ {stats['job_embeddings'] - job_idx['total_vectors']:+,} out of sync[/yellow]"
+                table.add_row("jobs.index", f"{job_idx['total_vectors']:,}", mem_str, status)
+
+            # Skill index
+            if "skills" in index_stats["indexes"]:
+                skill_idx = index_stats["indexes"]["skills"]
+                in_sync = skill_idx["total_skills"] == stats["skill_embeddings"]
+                status = "[green]✓ ready[/green]" if in_sync else "[yellow]⚠ out of sync[/yellow]"
+                table.add_row("skills.index", f"{skill_idx['total_skills']:,}", "-", status)
+
+            # Company index
+            if "companies" in index_stats["indexes"]:
+                company_idx = index_stats["indexes"]["companies"]
+                table.add_row(
+                    "companies.index",
+                    f"{company_idx['total_centroids']:,} centroids",
+                    "-",
+                    "[green]✓ ready[/green]",
+                )
+
+            console.print(table)
+            console.print(f"\n  Index directory: [dim]{index_dir}[/dim]")
+
+        except IndexCompatibilityError as e:
+            console.print(f"  [red]⚠ Index incompatible: {e}[/red]")
+            console.print("  Run [bold]mcf embed-generate --no-skip-existing[/bold] to rebuild")
+    else:
+        console.print("  [yellow]No FAISS indexes found[/yellow]")
+        console.print("  Run [bold]mcf embed-generate[/bold] to build indexes")
+
+    # Check for cluster files
+    cluster_dir = Path(index_dir)
     cluster_files = [
         "skill_clusters.pkl",
         "skill_to_cluster.pkl",

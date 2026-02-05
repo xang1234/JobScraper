@@ -358,6 +358,45 @@ Data is stored in `data/mcf_jobs.db` with six tables:
 - 5-minute gap = sleep detected (logs warning)
 - PID file management for start/stop/status
 
+### Embedding and Semantic Search Commands
+
+Generate vector embeddings for semantic search and build FAISS indexes for efficient similarity lookup:
+
+```bash
+# Generate embeddings and build FAISS indexes (full run)
+python -m src.cli embed-generate
+
+# Generate embeddings only (skip index building)
+python -m src.cli embed-generate --no-build-index
+
+# Regenerate all embeddings (ignore existing)
+python -m src.cli embed-generate --no-skip-existing
+
+# Sync new jobs and update indexes incrementally
+python -m src.cli embed-sync
+
+# Check embedding and index status
+python -m src.cli embed-status
+
+# Upgrade to a new embedding model
+python -m src.cli embed-upgrade all-mpnet-base-v2 --yes
+```
+
+**Embedding Options:**
+- `--batch-size, -b` - Jobs per batch (default: 32)
+- `--skip-existing/--no-skip-existing` - Skip jobs with embeddings (default: skip)
+- `--build-index/--no-build-index` - Build FAISS indexes after generation (default: build)
+- `--update-index/--no-update-index` - Update FAISS indexes on sync (default: update)
+- `--index-dir` - FAISS index directory (default: `data/embeddings`)
+- `--db` - Database path (default: `data/mcf_jobs.db`)
+
+**Generated Files:**
+- `data/embeddings/jobs.index` - FAISS IVFFlat index for job vectors
+- `data/embeddings/skills.index` - FAISS Flat index for skill vectors
+- `data/embeddings/jobs_uuids.npy` - UUID mapping for job index
+- `data/embeddings/skills_names.pkl` - Skill name mapping
+- `data/embeddings/skill_clusters.pkl` - Skill cluster data for query expansion
+
 ## Environment
 
 - Python 3.10+ with Poetry for dependency management
@@ -373,6 +412,12 @@ Data is stored in `data/mcf_jobs.db` with six tables:
 - `rich` - Terminal UI and progress bars
 - `pandas` - Data manipulation and CSV export
 - `sqlite3` - Database (Python stdlib)
+
+**Semantic Search:**
+- `sentence-transformers` - Embedding model (all-MiniLM-L6-v2)
+- `faiss-cpu` - Fast similarity search (IVFFlat index)
+- `scikit-learn` - Skill clustering (AgglomerativeClustering)
+- `numpy` - Vector operations
 
 **Legacy Scrapers:**
 - `selenium` - Browser automation
