@@ -39,6 +39,7 @@ from .index_manager import (
     IndexNotBuiltError,
     IndexCompatibilityError,
 )
+from .query_expander import QueryExpander
 
 __all__ = [
     "EmbeddingGenerator",
@@ -47,4 +48,5 @@ __all__ = [
     "FAISSIndexManager",
     "IndexNotBuiltError",
     "IndexCompatibilityError",
+    "QueryExpander",
 ]
