@@ -31,6 +31,8 @@ from src.mcf import (
     ScraperDaemon,
     DaemonAlreadyRunning,
     DaemonNotRunning,
+    EmbeddingGenerator,
+    EmbeddingStats,
 )
 
 app = typer.Typer(
@@ -1342,6 +1344,365 @@ def attempt_stats(
 
         console.print(table)
         console.print(f"\n[bold]Grand total:[/bold] {grand_total:,} attempts, {grand_found:,} jobs found")
+
+
+# Embedding commands
+
+
+@app.command(name="embed-generate")
+def generate_embeddings(
+    batch_size: int = typer.Option(
+        32, "--batch-size", "-b", help="Jobs to process in each batch"
+    ),
+    skip_existing: bool = typer.Option(
+        True,
+        "--skip-existing/--no-skip-existing",
+        help="Skip jobs that already have embeddings",
+    ),
+    db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """
+    Generate embeddings for all jobs in the database.
+
+    This preprocesses all jobs to create semantic embeddings for similarity search.
+    Run this once after initial data load, then use embed-sync for updates.
+
+    Examples:
+        mcf embed-generate
+        mcf embed-generate --batch-size 64
+        mcf embed-generate --no-skip-existing  # Regenerate all
+    """
+    setup_logging(verbose)
+
+    console.print("\n[bold blue]Generating Embeddings[/bold blue]")
+    console.print("━" * 40)
+
+    db = MCFDatabase(db_path)
+    generator = EmbeddingGenerator()
+
+    console.print(f"Model: [green]{generator.model_name}[/green] ({generator.DIMENSION} dimensions)")
+    console.print(f"Database: [green]{db_path}[/green]")
+    console.print()
+
+    # Get initial count for progress
+    if skip_existing:
+        jobs_to_process = db.get_jobs_without_embeddings(limit=1000000)
+        total_jobs = len(jobs_to_process)
+        if total_jobs == 0:
+            console.print("[green]✓ All jobs already have embeddings![/green]")
+            return
+        console.print(f"Jobs to process: [cyan]{total_jobs:,}[/cyan] (skipping existing)")
+    else:
+        total_jobs = db.count_jobs()
+        console.print(f"Jobs to process: [cyan]{total_jobs:,}[/cyan] (regenerating all)")
+
+    console.print()
+
+    # Run with progress bar
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[cyan]{task.completed:,}/{task.total:,}"),
+        TextColumn("[dim]({task.fields[speed]:.1f} jobs/sec)"),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Jobs", total=total_jobs, speed=0.0)
+
+        def on_progress(stats: EmbeddingStats):
+            progress.update(
+                task_id,
+                completed=stats.jobs_processed,
+                speed=stats.jobs_per_second,
+            )
+
+        stats = generator.generate_all(
+            db,
+            batch_size=batch_size,
+            skip_existing=skip_existing,
+            progress_callback=on_progress,
+        )
+
+    # Print summary
+    console.print("\n[bold green]✓ Embedding generation complete![/bold green]\n")
+
+    table = Table(title="Summary", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+
+    table.add_row("Jobs processed", f"{stats.jobs_processed:,}")
+    table.add_row("Jobs skipped", f"{stats.jobs_skipped:,}")
+    if stats.jobs_failed > 0:
+        table.add_row("Jobs failed", f"[red]{stats.jobs_failed:,}[/red]")
+    table.add_row("Skills extracted", f"{stats.unique_skills:,}")
+    table.add_row("Skill clusters", f"{stats.skill_clusters:,}")
+
+    # Format elapsed time
+    elapsed = stats.elapsed_seconds
+    if elapsed >= 60:
+        minutes, seconds = divmod(int(elapsed), 60)
+        elapsed_str = f"{minutes}m {seconds}s"
+    else:
+        elapsed_str = f"{elapsed:.1f}s"
+    table.add_row("Total time", elapsed_str)
+    table.add_row("Speed", f"{stats.jobs_per_second:.1f} jobs/sec")
+
+    console.print(table)
+
+
+@app.command(name="embed-sync")
+def sync_embeddings(
+    batch_size: int = typer.Option(
+        32, "--batch-size", "-b", help="Jobs to process in each batch"
+    ),
+    db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+) -> None:
+    """
+    Generate embeddings for new jobs (incremental update).
+
+    Only processes jobs that don't have embeddings yet.
+    Run this after each scrape to keep embeddings up-to-date.
+
+    Examples:
+        mcf embed-sync
+        mcf scrape "data scientist" && mcf embed-sync  # Chain commands
+    """
+    setup_logging(verbose)
+
+    console.print("\n[bold blue]Syncing Embeddings[/bold blue]")
+    console.print("━" * 40)
+
+    db = MCFDatabase(db_path)
+    generator = EmbeddingGenerator()
+
+    # Check how many jobs need embeddings
+    jobs_to_process = db.get_jobs_without_embeddings(limit=1000000)
+    total_new = len(jobs_to_process)
+
+    if total_new == 0:
+        console.print("[green]✓ All jobs are up-to-date![/green]")
+        return
+
+    console.print(f"New jobs to embed: [cyan]{total_new:,}[/cyan]")
+    console.print()
+
+    # Run with progress bar
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[cyan]{task.completed:,}/{task.total:,}"),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Embedding", total=total_new)
+
+        def on_progress(stats: EmbeddingStats):
+            progress.update(task_id, completed=stats.jobs_processed)
+
+        stats = generator.generate_all(
+            db,
+            batch_size=batch_size,
+            skip_existing=True,
+            progress_callback=on_progress,
+        )
+
+    console.print(f"\n[green]✓ Synced {stats.jobs_processed:,} jobs in {stats.elapsed_seconds:.1f}s[/green]")
+
+
+@app.command(name="embed-status")
+def embedding_status(
+    db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
+) -> None:
+    """
+    Show embedding generation status and coverage.
+
+    Displays statistics about embeddings in the database.
+
+    Example:
+        mcf embed-status
+    """
+    db = MCFDatabase(db_path)
+    stats = db.get_embedding_stats()
+
+    console.print("\n[bold blue]Embedding Status[/bold blue]")
+    console.print("━" * 40)
+
+    # Jobs section
+    console.print("\n[bold]Jobs:[/bold]")
+    console.print(f"  Total in database:     {stats['total_jobs']:,}")
+    console.print(f"  With embeddings:       {stats['job_embeddings']:,}")
+
+    coverage = stats["coverage_pct"]
+    coverage_style = "green" if coverage >= 95 else "yellow" if coverage >= 80 else "red"
+    console.print(f"  Coverage:              [{coverage_style}]{coverage:.1f}%[/{coverage_style}]")
+
+    if stats["model_version"]:
+        console.print(f"  Model version:         {stats['model_version']}")
+
+    # Skills section
+    console.print("\n[bold]Skills:[/bold]")
+    console.print(f"  With embeddings:       {stats['skill_embeddings']:,}")
+
+    # Companies section (if implemented)
+    if stats.get("company_embeddings", 0) > 0:
+        console.print("\n[bold]Companies:[/bold]")
+        console.print(f"  With embeddings:       {stats['company_embeddings']:,}")
+
+    # Check for cluster files
+    from pathlib import Path
+
+    cluster_dir = Path("data/embeddings")
+    cluster_files = [
+        "skill_clusters.pkl",
+        "skill_to_cluster.pkl",
+        "skill_cluster_centroids.pkl",
+    ]
+
+    console.print("\n[bold]Cluster Files:[/bold]")
+    for filename in cluster_files:
+        filepath = cluster_dir / filename
+        if filepath.exists():
+            size = filepath.stat().st_size
+            if size >= 1024 * 1024:
+                size_str = f"{size / 1024 / 1024:.1f} MB"
+            elif size >= 1024:
+                size_str = f"{size / 1024:.1f} KB"
+            else:
+                size_str = f"{size} B"
+            console.print(f"  {filename:<30} [green]✓ exists[/green] ({size_str})")
+        else:
+            console.print(f"  {filename:<30} [dim]not found[/dim]")
+
+    # Missing embeddings warning
+    if coverage < 100:
+        missing = stats["total_jobs"] - stats["job_embeddings"]
+        console.print(f"\n[yellow]⚠ {missing:,} jobs missing embeddings[/yellow]")
+        console.print("Run [bold]mcf embed-sync[/bold] to generate missing embeddings")
+
+
+@app.command(name="embed-upgrade")
+def upgrade_embeddings(
+    model: str = typer.Argument(..., help="New model name (e.g., all-mpnet-base-v2)"),
+    batch_size: int = typer.Option(
+        32, "--batch-size", "-b", help="Jobs to process in each batch"
+    ),
+    db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Path to SQLite database"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
+    confirm: bool = typer.Option(
+        False, "--yes", "-y", help="Skip confirmation prompt"
+    ),
+) -> None:
+    """
+    Re-generate all embeddings with a new model version.
+
+    This will:
+    1. Delete all existing embeddings
+    2. Generate new embeddings with the specified model
+    3. Rebuild skill clusters
+
+    Use this when upgrading to a better embedding model.
+
+    Examples:
+        mcf embed-upgrade all-mpnet-base-v2
+        mcf embed-upgrade all-MiniLM-L12-v2 --yes
+    """
+    setup_logging(verbose)
+
+    db = MCFDatabase(db_path)
+    stats = db.get_embedding_stats()
+
+    current_model = stats.get("model_version") or "none"
+    total_jobs = stats["total_jobs"]
+    current_embeddings = stats["job_embeddings"]
+
+    # Show warning
+    console.print("\n[bold yellow]⚠️  This will regenerate ALL embeddings![/bold yellow]\n")
+    console.print(f"Current model: [cyan]{current_model}[/cyan]")
+    console.print(f"New model:     [green]{model}[/green]")
+    console.print(f"Jobs to re-embed: [cyan]{total_jobs:,}[/cyan]")
+
+    if current_embeddings > 0:
+        console.print(f"Embeddings to delete: [red]{current_embeddings:,}[/red]")
+
+    # Confirm
+    if not confirm:
+        console.print()
+        proceed = typer.confirm("Continue?", default=False)
+        if not proceed:
+            console.print("[dim]Aborted[/dim]")
+            raise typer.Exit(0)
+
+    console.print()
+
+    # Step 1: Delete existing embeddings
+    if current_embeddings > 0:
+        console.print("Deleting existing embeddings...")
+        if current_model and current_model != "none":
+            deleted = db.delete_embeddings_for_model(current_model)
+            console.print(f"  Deleted {deleted:,} embeddings for model '{current_model}'")
+
+        # Also delete any embeddings with different/no model version
+        with db._connection() as conn:
+            remaining = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+            if remaining > 0:
+                conn.execute("DELETE FROM embeddings")
+                console.print(f"  Deleted {remaining:,} remaining embeddings")
+
+    # Step 2: Generate new embeddings with new model
+    console.print(f"\nGenerating embeddings with [green]{model}[/green]...")
+    console.print()
+
+    generator = EmbeddingGenerator(model_name=model)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TextColumn("[cyan]{task.completed:,}/{task.total:,}"),
+        TextColumn("[dim]({task.fields[speed]:.1f} jobs/sec)"),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Jobs", total=total_jobs, speed=0.0)
+
+        def on_progress(emb_stats: EmbeddingStats):
+            progress.update(
+                task_id,
+                completed=emb_stats.jobs_processed,
+                speed=emb_stats.jobs_per_second,
+            )
+
+        final_stats = generator.generate_all(
+            db,
+            batch_size=batch_size,
+            skip_existing=False,  # Regenerate all
+            progress_callback=on_progress,
+        )
+
+    # Summary
+    console.print("\n[bold green]✓ Embedding upgrade complete![/bold green]\n")
+
+    table = Table(title="Summary", show_header=False)
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+
+    table.add_row("New model", model)
+    table.add_row("Jobs processed", f"{final_stats.jobs_processed:,}")
+    table.add_row("Skills clustered", f"{final_stats.unique_skills:,}")
+
+    elapsed = final_stats.elapsed_seconds
+    if elapsed >= 60:
+        minutes, seconds = divmod(int(elapsed), 60)
+        elapsed_str = f"{minutes}m {seconds}s"
+    else:
+        elapsed_str = f"{elapsed:.1f}s"
+    table.add_row("Total time", elapsed_str)
+
+    console.print(table)
 
 
 if __name__ == "__main__":
