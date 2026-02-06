@@ -10,6 +10,7 @@ Usage:
 
 import asyncio
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -2187,6 +2188,46 @@ def serve_api(
         workers=1 if reload else workers,
         log_level="info",
     )
+
+
+@app.command(name="benchmark")
+def run_benchmark(
+    queries: int = typer.Option(100, "--queries", "-n", help="Number of benchmark queries"),
+    warmup: int = typer.Option(10, "--warmup", help="Number of warmup queries"),
+    embed_texts: int = typer.Option(
+        100, "--embed-texts", help="Number of texts for embedding benchmark"
+    ),
+    db_path: str = typer.Option("data/mcf_jobs.db", "--db", help="Database path"),
+    index_dir: str = typer.Option("data/embeddings", "--index-dir", help="FAISS index directory"),
+) -> None:
+    """
+    Run performance benchmarks on the semantic search system.
+
+    Measures search latency, embedding generation time, and index loading.
+    Checks results against performance targets:
+
+    - Search latency p95 < 100ms
+    - Cached search latency p95 < 20ms
+    - Query embedding time < 50ms
+    - Index load time < 5s
+
+    Example:
+        mcf benchmark --queries 50 --warmup 5
+    """
+    import subprocess
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/benchmark.py",
+            "--queries", str(queries),
+            "--warmup", str(warmup),
+            "--embed-texts", str(embed_texts),
+            "--db", db_path,
+            "--index-dir", index_dir,
+        ],
+    )
+    raise typer.Exit(result.returncode)
 
 
 if __name__ == "__main__":
