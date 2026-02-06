@@ -1,19 +1,31 @@
-# MyCareersFuture Job Scraper
+# MyCareersFuture Job Market Intelligence Platform
 
-A fast, reliable job market data collection system for MyCareersFuture.sg. Collects job listings for tech roles (Data Science, Machine Learning, Data Engineering) with automatic deduplication and history tracking.
+A job market data collection and semantic search platform for MyCareersFuture.sg. Scrapes job listings, generates vector embeddings, and serves hybrid BM25 + FAISS search through a REST API with a React frontend.
 
 ## Features
 
-- **Fast API-based scraping** - ~1-2 minutes for 2,000 jobs
-- **Historical archive access** - Enumerate all ~6.2M jobs from 2019-present
-- **SQLite storage** - Persistent database with automatic deduplication
-- **History tracking** - Records changes when jobs are re-scraped (salary updates, application counts)
-- **Resumable** - Automatically resumes interrupted scrapes
-- **Daemon mode** - Long-running background scraping with sleep/wake detection
-- **Adaptive rate limiting** - Backs off on 429s, recovers slowly after success
-- **Per-ID tracking** - Every fetch attempt logged for gap detection and retry
-- **Query interface** - Search, filter, and export data via CLI
-- **CSV/JSON export** - Export filtered subsets for analysis
+**Data Collection**
+- Fast API-based scraping — ~1-2 minutes for 2,000 jobs
+- Historical archive access — enumerate all ~6.2M jobs from 2019-present
+- SQLite storage with automatic deduplication and history tracking
+- Resumable scrapes, daemon mode, adaptive rate limiting, per-ID tracking
+
+**Semantic Search**
+- Hybrid ranking combining FAISS vector similarity + BM25 keyword matching
+- Query expansion with skill-cluster synonyms
+- Freshness boosting for recent postings
+- Skill similarity search, related skills discovery, company similarity
+- Degraded mode (keyword-only) when indexes are unavailable
+
+**REST API**
+- 12 endpoints covering search, recommendations, skills, analytics
+- Rate limiting, CORS, request logging middleware
+- Interactive Swagger docs at `/docs`
+
+**Deployment**
+- Docker Compose with backend + frontend/nginx services
+- Production overrides with resource limits and bind mounts
+- Data bootstrap script for seeding containers from local data
 
 ## Quick Start
 
@@ -21,22 +33,20 @@ A fast, reliable job market data collection system for MyCareersFuture.sg. Colle
 # Install dependencies
 poetry install
 
-# Preview search results
-poetry run python -m src.cli preview "data scientist"
-
-# Scrape jobs (stores in SQLite + exports CSV)
+# Scrape some jobs
 poetry run python -m src.cli scrape "data scientist"
 
-# Query the database
-poetry run python -m src.cli stats
-poetry run python -m src.cli list --limit 20
-poetry run python -m src.cli search "machine learning"
+# Generate embeddings and build search indexes
+poetry run python -m src.cli embed-generate
 
-# Start long-running historical scrape (daemon mode)
-poetry run python -m src.cli daemon start --year 2023
+# Semantic search from CLI
+poetry run python -m src.cli search-semantic "machine learning engineer"
 
-# Monitor progress
-poetry run python -m src.cli historical-status
+# Start API server (Swagger UI at http://localhost:8000/docs)
+poetry run python -m src.cli api-serve --reload
+
+# Or run everything with Docker
+docker compose up
 ```
 
 > **Tip:** Add an alias for convenience: `alias mcf="poetry run python -m src.cli"`
@@ -267,6 +277,187 @@ python -m src.cli history <job-uuid>
 python -m src.cli db-status
 ```
 
+### Semantic Search
+
+Hybrid search combining vector similarity with keyword matching. Requires embeddings to be generated first.
+
+```bash
+# Basic semantic search
+python -m src.cli search-semantic "machine learning engineer"
+
+# With filters
+python -m src.cli search-semantic "python developer" --salary-min 8000
+python -m src.cli search-semantic "data scientist" --company Google
+
+# Tune search behavior
+python -m src.cli search-semantic "AI engineer" --alpha 0.5   # More keyword weight
+python -m src.cli search-semantic "ML" --no-expand             # Disable query expansion
+
+# JSON output for scripting
+python -m src.cli search-semantic "data engineer" --json
+
+# Options
+#   --limit, -n           Number of results (default: 10)
+#   --salary-min          Minimum salary filter
+#   --salary-max          Maximum salary filter
+#   --company, -c         Company name filter
+#   --employment-type, -e Employment type filter
+#   --region, -r          Region filter
+#   --alpha               Semantic vs keyword weight (0=keyword, 1=semantic, default: 0.7)
+#   --no-expand           Disable query expansion with skill synonyms
+#   --json                Output as JSON
+```
+
+### Embeddings
+
+Generate vector embeddings and build FAISS indexes for semantic search:
+
+```bash
+# Generate embeddings and build FAISS indexes (full run)
+python -m src.cli embed-generate
+
+# Generate embeddings only (skip index building)
+python -m src.cli embed-generate --no-build-index
+
+# Regenerate all embeddings (ignore existing)
+python -m src.cli embed-generate --no-skip-existing
+
+# Sync new jobs and update indexes incrementally
+python -m src.cli embed-sync
+
+# Check embedding and index status
+python -m src.cli embed-status
+
+# Upgrade to a new embedding model
+python -m src.cli embed-upgrade all-mpnet-base-v2 --yes
+
+# Options (embed-generate / embed-sync)
+#   --batch-size, -b                 Jobs per batch (default: 32)
+#   --skip-existing/--no-skip-existing  Skip jobs with embeddings (default: skip)
+#   --build-index/--no-build-index   Build FAISS indexes after generation (default: build)
+#   --update-index/--no-update-index Update FAISS indexes on sync (default: update)
+#   --index-dir                      FAISS index directory (default: data/embeddings)
+#   --db                             Database path (default: data/mcf_jobs.db)
+```
+
+### REST API
+
+Start the semantic search API server:
+
+```bash
+# Start on localhost:8000 (Swagger UI at /docs)
+python -m src.cli api-serve
+
+# Development mode with auto-reload
+python -m src.cli api-serve --reload
+
+# Production mode with multiple workers
+python -m src.cli api-serve --workers 4
+
+# Custom host/port
+python -m src.cli api-serve --host 0.0.0.0 --port 9000
+
+# Options
+#   --host, -H       Host to bind to (default: 127.0.0.1)
+#   --port, -p       Port to bind to (default: 8000)
+#   --reload         Auto-reload for development
+#   --workers, -w    Number of worker processes (default: 1)
+#   --cors           Comma-separated CORS origins
+#   --rate-limit     Max requests per minute per IP (default: 100, 0 to disable)
+#   --db             Database path
+#   --index-dir      FAISS index directory
+```
+
+#### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/search` | POST | Hybrid semantic + keyword job search |
+| `/api/similar` | POST | Find jobs similar to a given UUID |
+| `/api/similar/batch` | POST | Batch similar jobs lookup (max 50 UUIDs) |
+| `/api/search/skills` | POST | Search jobs by skill similarity |
+| `/api/skills/cloud` | GET | Skill frequency data for visualization |
+| `/api/skills/related/{skill}` | GET | Related skills with similarity scores |
+| `/api/companies/similar` | POST | Find companies with similar job profiles |
+| `/api/stats` | GET | System statistics (index size, coverage) |
+| `/api/analytics/popular` | GET | Popular search queries |
+| `/api/analytics/performance` | GET | Search latency percentiles (p50/p90/p95/p99) |
+| `/health` | GET | Health check |
+| `/docs` | GET | Interactive Swagger UI |
+
+#### Example: Search Request
+
+```bash
+curl -X POST http://localhost:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "machine learning engineer",
+    "limit": 5,
+    "salary_min": 10000,
+    "alpha": 0.7
+  }'
+```
+
+Response:
+
+```json
+{
+  "results": [
+    {
+      "uuid": "abc-123",
+      "title": "ML Engineer",
+      "company_name": "Google",
+      "description": "We are looking for...",
+      "salary_min": 12000,
+      "salary_max": 18000,
+      "employment_type": "Full Time",
+      "skills": "Python, TensorFlow, PyTorch",
+      "similarity_score": 0.923
+    }
+  ],
+  "total_candidates": 1234,
+  "search_time_ms": 47.2,
+  "degraded": false,
+  "cache_hit": false
+}
+```
+
+### Docker Deployment
+
+Run the full stack (backend API + frontend/nginx) with Docker Compose:
+
+```bash
+# Start all services (frontend at :3000, API at :8000)
+docker compose up
+
+# Build and start in background
+docker compose up -d --build
+
+# Bootstrap local data into the container
+./docker/bootstrap-data.sh
+
+# Production mode with resource limits and bind mounts
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+./docker/bootstrap-data.sh --prod
+```
+
+**Services:**
+
+| Service | Container | Port | Description |
+|---------|-----------|------|-------------|
+| `backend` | `mcf-backend` | 8000 | FastAPI + uvicorn with FAISS indexes |
+| `frontend` | `mcf-frontend` | 3000 | React app served by nginx |
+
+The frontend container waits for the backend health check to pass before starting. Data is stored in Docker volumes (`mcf-data`, `hf-cache`) or bind-mounted to `/opt/mcf/` in production mode.
+
+### Benchmarks
+
+Run performance benchmarks on the search system:
+
+```bash
+python -m src.cli benchmark --queries 50 --warmup 5
+```
+
 ## Data Storage
 
 ### SQLite Database
@@ -292,6 +483,9 @@ Jobs are stored in `data/mcf_jobs.db` with the following tables:
 
 **`daemon_state`** - Background daemon tracking
 - PID, status, last heartbeat, current position
+
+**`embeddings`** - Vector embeddings for jobs and skills
+- Used by the semantic search engine and FAISS index builder
 
 ### Output Schema
 
@@ -322,18 +516,39 @@ Jobs are stored in `data/mcf_jobs.db` with the following tables:
 
 ```
 src/
-├── mcf/                      # Main scraper package
-│   ├── api_client.py         # Async HTTP client with retry
-│   ├── database.py           # SQLite operations + new tables
-│   ├── historical_scraper.py # Historical job enumeration
-│   ├── models.py             # Pydantic models
-│   ├── scraper.py            # Search-based scraping
-│   ├── storage.py            # Storage classes
-│   ├── batch_logger.py       # Per-ID attempt logging (batched)
-│   ├── adaptive_rate.py      # Dynamic rate limiting
-│   └── daemon.py             # Background process manager
-├── cli.py                    # CLI interface
-└── legacy/                   # Old Selenium scrapers
+├── api/                          # FastAPI REST API
+│   ├── app.py                    # Route definitions + app factory
+│   ├── models.py                 # Request/response Pydantic models
+│   └── middleware.py             # Rate limiting, request logging
+├── mcf/                          # Core scraper + search package
+│   ├── api_client.py             # Async HTTP client with retry
+│   ├── database.py               # SQLite operations
+│   ├── historical_scraper.py     # Historical job enumeration
+│   ├── models.py                 # Pydantic scraper models
+│   ├── scraper.py                # Search-based scraping
+│   ├── storage.py                # Storage classes
+│   ├── batch_logger.py           # Per-ID attempt logging (batched)
+│   ├── adaptive_rate.py          # Dynamic rate limiting
+│   ├── daemon.py                 # Background process manager
+│   └── embeddings/               # Semantic search engine
+│       ├── search_engine.py      # Hybrid BM25 + FAISS orchestrator
+│       ├── index_manager.py      # FAISS index build/load/save
+│       ├── generator.py          # Embedding generation + clustering
+│       ├── query_expander.py     # Skill-cluster query expansion
+│       └── models.py             # Search dataclasses
+├── frontend/                     # React + Vite frontend
+│   ├── src/                      # React components and pages
+│   ├── vite.config.ts            # Vite build configuration
+│   └── package.json              # Node.js dependencies
+├── cli.py                        # Typer CLI interface
+└── legacy/                       # Old Selenium scrapers
+docker/
+├── backend.Dockerfile            # Multi-stage Python build
+├── frontend.Dockerfile           # Multi-stage Node + nginx build
+├── nginx.conf                    # Reverse proxy configuration
+└── bootstrap-data.sh             # Data seeding script
+docker-compose.yml                # Local development stack
+docker-compose.prod.yml           # Production overrides
 ```
 
 ### Key Classes
@@ -358,6 +573,23 @@ async with HistoricalScraper() as scraper:
     await scraper.retry_gaps(2023)  # Retry any missed IDs
 ```
 
+```python
+from src.mcf.embeddings import SemanticSearchEngine, SearchRequest
+
+# Semantic search
+engine = SemanticSearchEngine("data/mcf_jobs.db", Path("data/embeddings"))
+engine.load()
+
+response = engine.search(SearchRequest(
+    query="machine learning engineer",
+    salary_min=10000,
+    alpha=0.7,
+))
+
+for job in response.results:
+    print(f"{job.title} @ {job.company_name} — {job.similarity_score:.3f}")
+```
+
 ### Robust Pipeline Components
 
 **`AdaptiveRateLimiter`** - Dynamic rate control
@@ -372,6 +604,11 @@ async with HistoricalScraper() as scraper:
 **`ScraperDaemon`** - Background process manager
 - Unix double-fork for proper daemonization
 - Heartbeat every 10s, detects 5+ minute gaps as sleep/wake
+
+**`SemanticSearchEngine`** - Hybrid search orchestrator
+- SQL pre-filtering → FAISS vector retrieval → BM25 re-ranking → freshness boost
+- LRU cache for repeated queries
+- Graceful degradation to keyword-only when indexes are missing
 
 ## Development
 
