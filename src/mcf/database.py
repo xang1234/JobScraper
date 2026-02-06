@@ -1757,6 +1757,23 @@ class MCFDatabase:
     # Company and Skills Methods (for semantic search features)
     # =========================================================================
 
+    def get_all_companies(self) -> list[str]:
+        """
+        Get list of all distinct company names.
+
+        Used by embedding generator to enumerate companies for centroid generation.
+
+        Returns:
+            Sorted list of company names
+        """
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT company_name FROM jobs "
+                "WHERE company_name IS NOT NULL AND company_name != '' "
+                "ORDER BY company_name"
+            ).fetchall()
+        return [row[0] for row in rows]
+
     def get_company_stats(self, company_name: str) -> dict:
         """
         Get statistics for a company.

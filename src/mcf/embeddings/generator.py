@@ -359,6 +359,79 @@ class EmbeddingGenerator:
 
         return company_centroids
 
+    def generate_company_centroids_from_db(
+        self,
+        db: "MCFDatabase",
+        k_centroids: int = 3,
+    ) -> dict[str, list[np.ndarray]]:
+        """
+        Generate multi-centroid embeddings from pre-computed job embeddings in DB.
+
+        Unlike generate_company_embeddings() which encodes raw Job text, this method
+        reuses embeddings already stored in the database — avoiding redundant model
+        inference.
+
+        For companies with >= 10 embedded jobs: K-means clustering into job families
+        For companies with < 10 embedded jobs: Single mean centroid
+
+        Args:
+            db: MCFDatabase with job embeddings already stored
+            k_centroids: Number of centroids for large companies
+
+        Returns:
+            Dict mapping company_name -> list of centroid embeddings
+        """
+        from sklearn.cluster import KMeans
+
+        companies = db.get_all_companies()
+        company_centroids: dict[str, list[np.ndarray]] = {}
+
+        logger.info(f"Generating centroids for {len(companies)} companies from stored embeddings")
+
+        for company in companies:
+            # Get job UUIDs for this company
+            jobs = db.search_jobs(company_name=company, limit=100000)
+            if not jobs:
+                continue
+
+            job_uuids = [j["uuid"] for j in jobs]
+            embeddings_dict = db.get_embeddings_for_uuids(job_uuids)
+
+            if not embeddings_dict:
+                continue
+
+            job_embeddings = np.array(list(embeddings_dict.values()), dtype=np.float32)
+
+            if len(job_embeddings) < 10:
+                # Single mean centroid for small companies
+                centroid = job_embeddings.mean(axis=0)
+                norm = np.linalg.norm(centroid)
+                if norm > 0:
+                    centroid = centroid / norm
+                company_centroids[company] = [centroid.astype(np.float32)]
+            else:
+                # K-means clustering for large companies
+                actual_k = min(k_centroids, len(job_embeddings) // 3)
+                actual_k = max(1, actual_k)
+
+                kmeans = KMeans(n_clusters=actual_k, random_state=42, n_init=10)
+                kmeans.fit(job_embeddings)
+
+                centroids = []
+                for centroid in kmeans.cluster_centers_:
+                    norm = np.linalg.norm(centroid)
+                    if norm > 0:
+                        centroid = centroid / norm
+                    centroids.append(centroid.astype(np.float32))
+
+                company_centroids[company] = centroids
+
+        logger.info(
+            f"Generated centroids for {len(company_centroids)} companies "
+            f"({sum(len(c) for c in company_centroids.values())} total centroids)"
+        )
+        return company_centroids
+
     def _save_skill_clusters(
         self,
         cluster_result: SkillClusterResult,
@@ -466,6 +539,24 @@ class EmbeddingGenerator:
 
             # Save cluster data to disk for QueryExpander
             self._save_skill_clusters(cluster_result, output_dir)
+
+        # Step 3.5: Generate company centroids from stored job embeddings
+        logger.info("Generating company centroids from stored embeddings...")
+        try:
+            company_centroids = self.generate_company_centroids_from_db(db)
+            if company_centroids:
+                # Store centroids in database as entity_type="company"
+                for company, centroids in company_centroids.items():
+                    for i, centroid in enumerate(centroids):
+                        entity_id = f"{company}::centroid_{i}"
+                        db.upsert_embedding(entity_id, "company", centroid, self.model_name)
+
+                stats.companies_processed = len(company_centroids)
+                logger.info(
+                    f"Stored centroids for {len(company_centroids)} companies"
+                )
+        except Exception as e:
+            logger.warning(f"Company centroid generation failed: {e}")
 
         # Step 4: Finalize stats
         stats.elapsed_seconds = time.time() - start_time

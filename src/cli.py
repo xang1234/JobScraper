@@ -1525,6 +1525,17 @@ def _build_faiss_indexes(
             progress.update(task, description=f"Building skill index ({len(skill_names):,} skills)...")
             index_manager.build_skill_index(skill_embeddings, skill_names)
 
+        # Generate company centroids and build company index
+        progress.update(task, description="Generating company centroids...")
+        company_centroids = generator.generate_company_centroids_from_db(db)
+        if company_centroids:
+            total_centroids = sum(len(c) for c in company_centroids.values())
+            progress.update(
+                task,
+                description=f"Building company index ({len(company_centroids):,} companies, {total_centroids:,} centroids)...",
+            )
+            index_manager.build_company_index(company_centroids)
+
         # Save indexes to disk
         progress.update(task, description="Saving indexes to disk...")
         index_manager.save()
@@ -1557,6 +1568,15 @@ def _build_faiss_indexes(
             f"{skill_idx['total_skills']:,}",
             "-",
             skill_idx["index_type"],
+        )
+
+    if "companies" in index_stats["indexes"]:
+        co_idx = index_stats["indexes"]["companies"]
+        table.add_row(
+            "companies.index",
+            f"{co_idx['total_companies']:,} ({co_idx['total_centroids']:,} centroids)",
+            "-",
+            co_idx["index_type"],
         )
 
     console.print(table)

@@ -437,8 +437,12 @@ class SemanticSearchEngine:
         """
         Find companies with similar job profiles.
 
-        Uses company centroid embeddings to find companies that hire
-        for similar roles.
+        Primary: Uses pre-computed multi-centroid company index for efficient matching.
+        For each source centroid, searches the company index and aggregates by
+        max similarity across all centroid pairs between source and target companies.
+
+        Fallback: If company index is unavailable, computes a single centroid on-the-fly
+        from the source company's job embeddings and searches the jobs index.
 
         Args:
             request: Company similarity request
@@ -452,14 +456,96 @@ class SemanticSearchEngine:
         if self._degraded or not self._has_vector_index:
             return []
 
-        # Get company stats to find their embedding
+        # Check source company exists
         source_stats = self.db.get_company_stats(request.company_name)
         if source_stats.get("job_count", 0) == 0:
             logger.warning(f"No jobs found for company: {request.company_name}")
             return []
 
-        # Get a representative job embedding for this company
-        # (using average of their job embeddings)
+        # Primary path: use pre-computed company multi-centroid index
+        if self.index_manager.has_company_index():
+            source_centroids = self.index_manager.get_company_centroids(
+                request.company_name
+            )
+            if source_centroids is not None:
+                return self._find_similar_companies_multi_centroid(
+                    request, source_centroids
+                )
+
+        # Fallback: on-the-fly single centroid via jobs index
+        return self._find_similar_companies_fallback(request)
+
+    def _find_similar_companies_multi_centroid(
+        self,
+        request: CompanySimilarityRequest,
+        source_centroids: np.ndarray,
+    ) -> list[CompanySimilarity]:
+        """
+        Find similar companies using multi-centroid matching.
+
+        For each source centroid, searches the company index. For each target
+        company, takes the max similarity across all source-target centroid pairs.
+
+        Args:
+            request: Company similarity request
+            source_centroids: Source company's centroid array (n_centroids, dim)
+
+        Returns:
+            List of CompanySimilarity results
+        """
+        company_scores: dict[str, float] = {}
+
+        # For each source centroid, search company index
+        for centroid in source_centroids:
+            try:
+                results = self.index_manager.search_companies(
+                    centroid, k=request.limit + 10
+                )
+            except IndexNotBuiltError:
+                continue
+
+            for company_name, score in results:
+                if company_name == request.company_name:
+                    continue
+                # Max similarity across all centroid pairs
+                if company_name not in company_scores or score > company_scores[company_name]:
+                    company_scores[company_name] = score
+
+        # Sort by score descending
+        sorted_companies = sorted(
+            company_scores.items(), key=lambda x: x[1], reverse=True
+        )[: request.limit]
+
+        # Enrich with company stats
+        results_list: list[CompanySimilarity] = []
+        for company_name, score in sorted_companies:
+            stats = self.db.get_company_stats(company_name)
+            results_list.append(
+                CompanySimilarity(
+                    company_name=company_name,
+                    similarity_score=score,
+                    job_count=stats.get("job_count", 0),
+                    avg_salary=stats.get("avg_salary"),
+                    top_skills=stats.get("top_skills", [])[:5],
+                )
+            )
+
+        return results_list
+
+    def _find_similar_companies_fallback(
+        self, request: CompanySimilarityRequest
+    ) -> list[CompanySimilarity]:
+        """
+        Fallback: compute single centroid on-the-fly and search jobs index.
+
+        Used when company index is not available (degraded mode).
+
+        Args:
+            request: Company similarity request
+
+        Returns:
+            List of CompanySimilarity results
+        """
         company_jobs = self.db.search_jobs(
             company_name=request.company_name,
             limit=50,
@@ -468,20 +554,20 @@ class SemanticSearchEngine:
         if not company_jobs:
             return []
 
-        # Get embeddings for company's jobs
         job_uuids = [j["uuid"] for j in company_jobs]
         embeddings_dict = self.db.get_embeddings_for_uuids(job_uuids)
 
         if not embeddings_dict:
             return []
 
-        # Compute centroid
+        # Compute single centroid
         embeddings = np.array(list(embeddings_dict.values()))
         centroid = embeddings.mean(axis=0)
-        centroid = centroid / np.linalg.norm(centroid)  # Normalize
+        norm = np.linalg.norm(centroid)
+        if norm > 0:
+            centroid = centroid / norm
 
         try:
-            # Search for similar jobs
             similar_jobs = self.index_manager.search_jobs(centroid, k=500)
         except IndexNotBuiltError:
             return []

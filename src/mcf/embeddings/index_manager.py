@@ -573,6 +573,35 @@ class FAISSIndexManager:
         )
         return sorted_companies[:k]
 
+    def get_company_centroids(self, company_name: str) -> Optional[np.ndarray]:
+        """
+        Get pre-computed centroids for a specific company.
+
+        Returns the centroid vectors stored in the company index for the
+        given company. Used by search_engine to compare companies via
+        multi-centroid matching.
+
+        Args:
+            company_name: Company name to look up
+
+        Returns:
+            Array of shape (n_centroids, dimension) or None if company not found
+        """
+        if self._all_company_centroids is None or company_name not in self._company_centroid_map:
+            return None
+
+        indices = self._company_centroid_map[company_name]
+        return self._all_company_centroids[indices]
+
+    def has_company_index(self) -> bool:
+        """Check if a company index is loaded and available."""
+        return (
+            "companies" in self.indexes
+            and self.indexes["companies"] is not None
+            and self._all_company_centroids is not None
+            and len(self._company_centroid_map) > 0
+        )
+
     # =========================================================================
     # Update Methods
     # =========================================================================
