@@ -83,6 +83,21 @@ def _make_mock_engine(degraded=False, loaded=True):
             "index_size_mb": 125.5,
         },
     }
+    engine.get_skill_cloud.return_value = {
+        "items": [
+            {"skill": "Python", "job_count": 5000, "cluster_id": 1},
+            {"skill": "Java", "job_count": 3000, "cluster_id": 2},
+        ],
+        "total_unique_skills": 1200,
+    }
+    engine.get_related_skills.return_value = {
+        "skill": "Python",
+        "related": [
+            {"skill": "Pandas", "similarity": 0.85, "same_cluster": True},
+            {"skill": "NumPy", "similarity": 0.82, "same_cluster": True},
+            {"skill": "Django", "similarity": 0.65, "same_cluster": False},
+        ],
+    }
     engine.db.get_popular_queries.return_value = [
         {"query": "data scientist", "count": 42}
     ]
@@ -285,6 +300,80 @@ class TestSkillSearchEndpoint:
 
     def test_empty_skill_rejected(self, client):
         resp = client.post("/api/search/skills", json={"skill": ""})
+        assert resp.status_code == 422
+
+
+# =============================================================================
+# Skill Cloud Endpoint
+# =============================================================================
+
+
+class TestSkillCloudEndpoint:
+    def test_skill_cloud(self, client, mock_engine):
+        resp = client.get("/api/skills/cloud")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["items"]) == 2
+        assert data["items"][0]["skill"] == "Python"
+        assert data["items"][0]["job_count"] == 5000
+        assert data["items"][0]["cluster_id"] == 1
+        assert data["total_unique_skills"] == 1200
+        mock_engine.get_skill_cloud.assert_called_once()
+
+    def test_skill_cloud_with_params(self, client, mock_engine):
+        resp = client.get("/api/skills/cloud?min_jobs=100&limit=50")
+        assert resp.status_code == 200
+        call_kwargs = mock_engine.get_skill_cloud.call_args
+        assert call_kwargs.kwargs["min_jobs"] == 100 or call_kwargs[1]["min_jobs"] == 100
+
+    def test_skill_cloud_invalid_min_jobs(self, client):
+        resp = client.get("/api/skills/cloud?min_jobs=0")
+        assert resp.status_code == 422
+
+    def test_skill_cloud_limit_too_large(self, client):
+        resp = client.get("/api/skills/cloud?limit=501")
+        assert resp.status_code == 422
+
+    def test_skill_cloud_no_engine(self, client_no_engine):
+        resp = client_no_engine.get("/api/skills/cloud")
+        assert resp.status_code == 503
+
+
+# =============================================================================
+# Related Skills Endpoint
+# =============================================================================
+
+
+class TestRelatedSkillsEndpoint:
+    def test_related_skills(self, client, mock_engine):
+        resp = client.get("/api/skills/related/Python")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["skill"] == "Python"
+        assert len(data["related"]) == 3
+        assert data["related"][0]["skill"] == "Pandas"
+        assert data["related"][0]["similarity"] == 0.85
+        assert data["related"][0]["same_cluster"] is True
+        assert data["related"][2]["same_cluster"] is False
+
+    def test_related_skills_with_k(self, client, mock_engine):
+        resp = client.get("/api/skills/related/Python?k=5")
+        assert resp.status_code == 200
+        call_kwargs = mock_engine.get_related_skills.call_args
+        assert call_kwargs.kwargs["k"] == 5 or call_kwargs[1]["k"] == 5
+
+    def test_related_skills_unknown(self, client, mock_engine):
+        mock_engine.get_related_skills.return_value = None
+        resp = client.get("/api/skills/related/UnknownSkill123")
+        assert resp.status_code == 404
+        assert "Unknown skill" in resp.json()["error"]["message"]
+
+    def test_related_skills_no_engine(self, client_no_engine):
+        resp = client_no_engine.get("/api/skills/related/Python")
+        assert resp.status_code == 503
+
+    def test_related_skills_k_too_large(self, client):
+        resp = client.get("/api/skills/related/Python?k=51")
         assert resp.status_code == 422
 
 

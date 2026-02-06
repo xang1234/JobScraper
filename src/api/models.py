@@ -333,6 +333,47 @@ class HealthResponse(BaseModel):
 
 
 # =============================================================================
+# Skill Feature Models
+# =============================================================================
+
+
+class SkillCloudItem(BaseModel):
+    """Item in skill cloud response."""
+
+    skill: str
+    job_count: int
+    cluster_id: Optional[int] = Field(
+        None, description="Cluster ID for color coding in visualizations"
+    )
+
+
+class SkillCloudResponse(BaseModel):
+    """Response for skill cloud endpoint."""
+
+    items: list[SkillCloudItem]
+    total_unique_skills: int = Field(
+        description="Total unique skills across all jobs (before filtering)"
+    )
+
+
+class RelatedSkill(BaseModel):
+    """A related skill with similarity score."""
+
+    skill: str
+    similarity: float = Field(description="Cosine similarity [0, 1]")
+    same_cluster: bool = Field(
+        description="True if in same skill cluster (strong synonym)"
+    )
+
+
+class RelatedSkillsResponse(BaseModel):
+    """Response for related skills endpoint."""
+
+    skill: str = Field(description="Input skill queried")
+    related: list[RelatedSkill]
+
+
+# =============================================================================
 # Error Models
 # =============================================================================
 

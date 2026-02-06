@@ -927,6 +927,117 @@ class SemanticSearchEngine:
         except Exception as e:
             logger.warning(f"Failed to log search analytics: {e}")
 
+    def get_skill_cloud(self, min_jobs: int = 10, limit: int = 100) -> dict:
+        """
+        Get skill frequency data for visualization (word cloud, bar chart).
+
+        Fetches skill occurrence counts from the database and annotates
+        each skill with its cluster ID from the query expander (if loaded).
+
+        Args:
+            min_jobs: Minimum job count for a skill to be included
+            limit: Maximum number of skills to return
+
+        Returns:
+            Dict with 'items' (list of skill dicts) and 'total_unique_skills'
+        """
+        if not self._loaded:
+            self.load()
+
+        # Single DB call — get all skills, then filter in Python
+        all_skills = self.db.get_skill_frequencies(min_jobs=1, limit=100000)
+        total_unique = len(all_skills)
+
+        # Apply caller's min_jobs filter (already sorted by freq desc)
+        filtered = [(s, c) for s, c in all_skills if c >= min_jobs][:limit]
+
+        items = []
+        for skill, count in filtered:
+            cluster_id = None
+            if self.query_expander:
+                cluster_id = self.query_expander.skill_to_cluster.get(skill)
+            items.append({
+                "skill": skill,
+                "job_count": count,
+                "cluster_id": cluster_id,
+            })
+
+        return {
+            "items": items,
+            "total_unique_skills": total_unique,
+        }
+
+    def get_related_skills(self, skill: str, k: int = 10) -> Optional[dict]:
+        """
+        Get skills related to a given skill.
+
+        Primary strategy: FAISS embedding similarity on the skill index,
+        annotated with cluster membership from QueryExpander.
+        Fallback: cluster-only lookup when FAISS skill index is unavailable.
+
+        Args:
+            skill: Skill name to find relatives for
+            k: Maximum number of related skills to return
+
+        Returns:
+            Dict with 'skill' and 'related' list, or None if skill not found
+        """
+        if not self._loaded:
+            self.load()
+
+        source_cluster = None
+        if self.query_expander:
+            source_cluster = self.query_expander.skill_to_cluster.get(skill)
+
+        # Primary: FAISS embedding similarity
+        if (
+            self._has_vector_index
+            and "skills" in self.index_manager.indexes
+            and self.index_manager.indexes["skills"] is not None
+        ):
+            skill_idx = self.index_manager.skill_to_idx.get(skill)
+            if skill_idx is not None:
+                # Reconstruct the skill's own embedding from the Flat index
+                skill_embedding = self.index_manager.indexes["skills"].reconstruct(
+                    skill_idx
+                )
+                similar = self.index_manager.search_skills(skill_embedding, k=k + 1)
+
+                related = []
+                for s, score in similar:
+                    if s == skill:
+                        continue
+                    same_cluster = False
+                    if self.query_expander:
+                        s_cluster = self.query_expander.skill_to_cluster.get(s)
+                        same_cluster = (
+                            s_cluster is not None and s_cluster == source_cluster
+                        )
+                    related.append({
+                        "skill": s,
+                        "similarity": round(float(score), 4),
+                        "same_cluster": same_cluster,
+                    })
+
+                return {
+                    "skill": skill,
+                    "related": related[:k],
+                }
+
+        # Fallback: cluster-only (no similarity scores available)
+        if self.query_expander:
+            cluster_skills = self.query_expander.get_related_skills(skill, k=k)
+            if cluster_skills:
+                return {
+                    "skill": skill,
+                    "related": [
+                        {"skill": s, "similarity": 1.0, "same_cluster": True}
+                        for s in cluster_skills
+                    ],
+                }
+
+        return None  # Skill not found
+
     def clear_caches(self) -> None:
         """Clear all caches."""
         self._query_cache.clear()

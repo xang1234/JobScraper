@@ -20,7 +20,7 @@ from functools import partial
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -31,11 +31,15 @@ from .models import (
     ErrorResponse,
     HealthResponse,
     JobResult,
+    RelatedSkill,
+    RelatedSkillsResponse,
     SearchRequest,
     SearchResponse,
     SimilarBatchRequest,
     SimilarBatchResponse,
     SimilarJobsRequest,
+    SkillCloudItem,
+    SkillCloudResponse,
     SkillSearchRequest,
     StatsResponse,
 )
@@ -251,6 +255,54 @@ def _register_routes(app: FastAPI) -> None:
             None, engine.search_by_skill, internal_req
         )
         return SearchResponse.from_internal(internal_resp)
+
+    # -- Skill feature endpoints ------------------------------------------------
+
+    @app.get("/api/skills/cloud", response_model=SkillCloudResponse)
+    async def skill_cloud(
+        min_jobs: int = Query(10, ge=1, description="Minimum jobs for a skill to appear"),
+        limit: int = Query(100, ge=1, le=500, description="Maximum skills to return"),
+        engine: SemanticSearchEngine = Depends(get_engine),
+    ) -> SkillCloudResponse:
+        """
+        Get skill frequency data for visualization.
+
+        Returns skills with job counts and optional cluster IDs for color coding.
+        Useful for word clouds, bar charts, or skill distribution analysis.
+        """
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None, partial(engine.get_skill_cloud, min_jobs=min_jobs, limit=limit)
+        )
+        return SkillCloudResponse(
+            items=[SkillCloudItem(**item) for item in raw["items"]],
+            total_unique_skills=raw["total_unique_skills"],
+        )
+
+    @app.get("/api/skills/related/{skill}", response_model=RelatedSkillsResponse)
+    async def related_skills(
+        skill: str,
+        k: int = Query(10, ge=1, le=50, description="Number of related skills"),
+        engine: SemanticSearchEngine = Depends(get_engine),
+    ) -> RelatedSkillsResponse:
+        """
+        Get skills related to a given skill.
+
+        Uses embedding similarity (FAISS) with cluster annotation.
+        Falls back to cluster-only lookup when the skill index is unavailable.
+        """
+        loop = asyncio.get_running_loop()
+        raw = await loop.run_in_executor(
+            None, partial(engine.get_related_skills, skill=skill, k=k)
+        )
+        if raw is None:
+            raise HTTPException(status_code=404, detail=f"Unknown skill: {skill}")
+        return RelatedSkillsResponse(
+            skill=raw["skill"],
+            related=[RelatedSkill(**r) for r in raw["related"]],
+        )
+
+    # -- Company endpoints -----------------------------------------------------
 
     @app.post("/api/companies/similar", response_model=list[CompanySimilarity])
     async def similar_companies(

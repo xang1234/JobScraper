@@ -12,11 +12,15 @@ from src.api.models import (
     ErrorResponse,
     HealthResponse,
     JobResult,
+    RelatedSkill,
+    RelatedSkillsResponse,
     SearchRequest,
     SearchResponse,
     SimilarBatchRequest,
     SimilarBatchResponse,
     SimilarJobsRequest,
+    SkillCloudItem,
+    SkillCloudResponse,
     SkillSearchRequest,
     StatsResponse,
 )
@@ -338,6 +342,65 @@ class TestHealthResponse:
     def test_degraded(self):
         resp = HealthResponse(status="degraded", index_loaded=False, degraded=True)
         assert resp.degraded is True
+
+
+# =============================================================================
+# Skill Feature Model Tests
+# =============================================================================
+
+
+class TestSkillCloudItem:
+    def test_valid(self):
+        item = SkillCloudItem(skill="Python", job_count=5000, cluster_id=1)
+        assert item.skill == "Python"
+        assert item.job_count == 5000
+        assert item.cluster_id == 1
+
+    def test_cluster_id_optional(self):
+        item = SkillCloudItem(skill="Python", job_count=5000)
+        assert item.cluster_id is None
+
+
+class TestSkillCloudResponse:
+    def test_valid(self):
+        resp = SkillCloudResponse(
+            items=[
+                SkillCloudItem(skill="Python", job_count=5000, cluster_id=1),
+                SkillCloudItem(skill="Java", job_count=3000),
+            ],
+            total_unique_skills=1200,
+        )
+        assert len(resp.items) == 2
+        assert resp.total_unique_skills == 1200
+
+    def test_empty_items(self):
+        resp = SkillCloudResponse(items=[], total_unique_skills=0)
+        assert resp.items == []
+
+
+class TestRelatedSkill:
+    def test_valid(self):
+        skill = RelatedSkill(skill="Pandas", similarity=0.85, same_cluster=True)
+        assert skill.skill == "Pandas"
+        assert skill.similarity == 0.85
+        assert skill.same_cluster is True
+
+
+class TestRelatedSkillsResponse:
+    def test_valid(self):
+        resp = RelatedSkillsResponse(
+            skill="Python",
+            related=[
+                RelatedSkill(skill="Pandas", similarity=0.85, same_cluster=True),
+                RelatedSkill(skill="Django", similarity=0.65, same_cluster=False),
+            ],
+        )
+        assert resp.skill == "Python"
+        assert len(resp.related) == 2
+
+    def test_empty_related(self):
+        resp = RelatedSkillsResponse(skill="ObscureSkill", related=[])
+        assert resp.related == []
 
 
 # =============================================================================
