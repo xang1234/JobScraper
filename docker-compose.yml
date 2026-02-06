@@ -1,0 +1,39 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+    container_name: mcf-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - mcf-data:/app/data
+      - hf-cache:/app/.cache/huggingface
+    environment:
+      - MCF_DB_PATH=/app/data/mcf_jobs.db
+      - MCF_INDEX_DIR=/app/data/embeddings
+      - MCF_CORS_ORIGINS=*
+      - MCF_RATE_LIMIT_RPM=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    container_name: mcf-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  mcf-data:
+    driver: local
+  hf-cache:
+    driver: local
