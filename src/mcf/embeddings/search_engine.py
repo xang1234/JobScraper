@@ -210,11 +210,34 @@ class SemanticSearchEngine:
             return cached
 
         try:
-            # Step 1: SQL filtering
-            candidates = self._apply_sql_filters(request)
-            total_candidates = len(candidates)
+            # Step 1: Get candidates
+            # When SQL filters are active, they constrain the result set.
+            # When unfiltered AND vectors are available, use FAISS to search the
+            # full index directly — avoids loading millions of rows into memory
+            # just to pass them back to FAISS.
+            has_filters = self._has_sql_filters(request)
 
-            if not candidates:
+            if has_filters:
+                candidates = self._apply_sql_filters(request)
+                total_candidates = len(candidates)
+                candidate_uuids = [c["uuid"] for c in candidates]
+            elif self._has_vector_index and not self._degraded:
+                # Vector-first path: let FAISS find the best semantic matches
+                # from the full index, then score those with BM25.
+                vector_k = max(1000, request.limit * 50)
+                query_embedding = self._get_query_embedding(request.query)
+                semantic_results = self.index_manager.search_jobs(
+                    query_embedding, k=vector_k,
+                )
+                candidate_uuids = [uuid for uuid, _ in semantic_results]
+                total_candidates = self.index_manager.indexes["jobs"].ntotal
+            else:
+                # Degraded / no vectors: fall back to SQL with a generous cap
+                candidates = self._apply_sql_filters(request)
+                total_candidates = len(candidates)
+                candidate_uuids = [c["uuid"] for c in candidates]
+
+            if not candidate_uuids:
                 response = SearchResponse(
                     results=[],
                     total_candidates=0,
@@ -240,7 +263,7 @@ class SemanticSearchEngine:
                 scored_results = self._compute_hybrid_scores(
                     query=request.query,
                     search_query=search_query,
-                    candidate_uuids=[c["uuid"] for c in candidates],
+                    candidate_uuids=candidate_uuids,
                     alpha=request.alpha,
                     freshness_weight=request.freshness_weight,
                 )
@@ -248,7 +271,7 @@ class SemanticSearchEngine:
                 # Degraded mode: keyword-only search
                 scored_results = self._keyword_only_scores(
                     search_query=search_query,
-                    candidate_uuids=[c["uuid"] for c in candidates],
+                    candidate_uuids=candidate_uuids,
                     freshness_weight=request.freshness_weight,
                 )
 
@@ -686,9 +709,23 @@ class SemanticSearchEngine:
     # Private Helper Methods
     # =========================================================================
 
+    def _has_sql_filters(self, request: SearchRequest) -> bool:
+        """Check whether a request has any active SQL filter parameters."""
+        return any([
+            request.salary_min is not None,
+            request.salary_max is not None,
+            request.employment_type is not None,
+            request.company is not None,
+            request.region is not None,
+        ])
+
     def _apply_sql_filters(self, request: SearchRequest) -> list[dict]:
         """
         Apply SQL filters and return matching jobs.
+
+        When filters are active, returns all matching rows (no hard cap)
+        since the filters already constrain the result set. When no filters
+        are present, applies a cap to avoid loading the entire database.
 
         Args:
             request: Search request with filter parameters
@@ -696,13 +733,16 @@ class SemanticSearchEngine:
         Returns:
             List of job dicts matching filters
         """
+        # When filters are active, they constrain the result set — no cap needed.
+        # When unfiltered, cap at 500K to bound memory while covering most datasets.
+        limit = 10_000_000 if self._has_sql_filters(request) else 500_000
         return self.db.search_jobs(
             salary_min=request.salary_min,
             salary_max=request.salary_max,
             employment_type=request.employment_type,
             company_name=request.company,
             region=request.region,
-            limit=100000,  # Get all matching for ranking
+            limit=limit,
         )
 
     def _get_query_embedding(self, query: str) -> np.ndarray:
