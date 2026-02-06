@@ -556,6 +556,38 @@ class MCFDatabase:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_jobs_bulk(self, uuids: list[str]) -> dict[str, dict]:
+        """
+        Get multiple jobs by UUID in a single query.
+
+        Uses chunked IN clauses to stay within SQLite's variable limit.
+
+        Args:
+            uuids: List of job UUIDs
+
+        Returns:
+            Dict mapping uuid -> job data dict (missing UUIDs omitted)
+        """
+        if not uuids:
+            return {}
+
+        results: dict[str, dict] = {}
+        chunk_size = 500  # Well under SQLite's 999 variable limit
+
+        with self._connection() as conn:
+            for i in range(0, len(uuids), chunk_size):
+                chunk = uuids[i : i + chunk_size]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM jobs WHERE uuid IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    d = dict(row)
+                    results[d["uuid"]] = d
+
+        return results
+
     def get_job_history(self, uuid: str) -> list[dict]:
         """
         Get history records for a job.

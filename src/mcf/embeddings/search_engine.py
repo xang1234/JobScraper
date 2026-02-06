@@ -338,15 +338,23 @@ class SemanticSearchEngine:
 
         # Filter results
         filtered: list[tuple[str, float]] = []
+        if request.exclude_same_company and source_job:
+            candidate_uuids = [u for u, _ in results if u != request.job_uuid]
+            jobs_bulk = self.db.get_jobs_bulk(candidate_uuids)
+            source_company = source_job.get("company_name")
+        else:
+            jobs_bulk = {}
+            source_company = None
+
         for uuid, score in results:
             # Skip the source job itself
             if uuid == request.job_uuid:
                 continue
 
             # Skip same company if requested
-            if request.exclude_same_company and source_job:
-                job = self.db.get_job(uuid)
-                if job and job.get("company_name") == source_job.get("company_name"):
+            if source_company:
+                job = jobs_bulk.get(uuid)
+                if job and job.get("company_name") == source_company:
                     continue
 
             filtered.append((uuid, score))
@@ -599,9 +607,10 @@ class SemanticSearchEngine:
             return []
 
         # Aggregate by company
+        jobs_bulk = self.db.get_jobs_bulk([u for u, _ in similar_jobs])
         company_scores: dict[str, list[float]] = {}
         for uuid, score in similar_jobs:
-            job = self.db.get_job(uuid)
+            job = jobs_bulk.get(uuid)
             if job and job.get("company_name"):
                 company = job["company_name"]
                 if company == request.company_name:
@@ -917,8 +926,9 @@ class SemanticSearchEngine:
         scores: dict[str, float] = {}
         today = date.today()
 
+        jobs = self.db.get_jobs_bulk(uuids)
         for uuid in uuids:
-            job = self.db.get_job(uuid)
+            job = jobs.get(uuid)
             if job and job.get("posted_date"):
                 try:
                     posted = job["posted_date"]
@@ -976,8 +986,9 @@ class SemanticSearchEngine:
         """
         results: list[JobResult] = []
 
+        jobs = self.db.get_jobs_bulk([uuid for uuid, _ in scored_results])
         for uuid, score in scored_results:
-            job = self.db.get_job(uuid)
+            job = jobs.get(uuid)
             if job:
                 # Parse posted_date if it's a string
                 posted_date = job.get("posted_date")
