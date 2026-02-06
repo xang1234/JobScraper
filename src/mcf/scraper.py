@@ -2,7 +2,7 @@
 Job scraper orchestration for MyCareersFuture.
 
 Coordinates the API client and storage layer with:
-- Concurrent job fetching with semaphore control
+- Sequential paginated fetching with rate limiting
 - Checkpoint-based resume after interruption
 - Graceful shutdown on Ctrl+C
 - Progress tracking with callbacks
@@ -28,7 +28,7 @@ class MCFScraper:
     High-level scraper that orchestrates job collection.
 
     Features:
-    - Concurrent fetching with configurable parallelism
+    - Sequential paginated fetching with rate limiting
     - Automatic checkpointing every N jobs
     - Resume from previous incomplete runs
     - Graceful shutdown preserving progress
@@ -44,7 +44,6 @@ class MCFScraper:
         self,
         output_dir: str = "data",
         checkpoint_interval: int = 100,
-        concurrency: int = 5,
         requests_per_second: float = 2.0,
         use_sqlite: bool = True,
         db_path: str = "data/mcf_jobs.db",
@@ -55,7 +54,6 @@ class MCFScraper:
         Args:
             output_dir: Directory for output files
             checkpoint_interval: Save checkpoint every N jobs
-            concurrency: Maximum concurrent API requests
             requests_per_second: Rate limit for API requests
             use_sqlite: Use SQLite storage with history tracking (default: True)
             db_path: Path to SQLite database file
@@ -67,7 +65,6 @@ class MCFScraper:
             self.storage = JobStorage(output_dir=output_dir)
 
         self.checkpoint_interval = checkpoint_interval
-        self.concurrency = concurrency
         self.requests_per_second = requests_per_second
 
         self._shutdown_event = asyncio.Event()
