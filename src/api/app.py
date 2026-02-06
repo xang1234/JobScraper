@@ -81,18 +81,33 @@ def get_engine() -> SemanticSearchEngine:
 
 
 def create_app(
-    db_path: str = "data/mcf_jobs.db",
-    index_dir: str = "data/embeddings",
+    db_path: str | None = None,
+    index_dir: str | None = None,
     cors_origins: Optional[list[str]] = None,
 ) -> FastAPI:
     """
     Application factory.
 
     Args:
-        db_path: Path to the SQLite database.
-        index_dir: Directory containing FAISS indexes.
-        cors_origins: Allowed CORS origins.  Defaults to common localhost ports.
+        db_path: Path to the SQLite database.  Falls back to
+            ``MCF_DB_PATH`` env var, then ``"data/mcf_jobs.db"``.
+        index_dir: Directory containing FAISS indexes.  Falls back to
+            ``MCF_INDEX_DIR`` env var, then ``"data/embeddings"``.
+        cors_origins: Allowed CORS origins.  Falls back to
+            ``MCF_CORS_ORIGINS`` env var (comma-separated), then
+            common localhost ports.
     """
+    import os
+
+    if db_path is None:
+        db_path = os.environ.get("MCF_DB_PATH", "data/mcf_jobs.db")
+    if index_dir is None:
+        index_dir = os.environ.get("MCF_INDEX_DIR", "data/embeddings")
+    if cors_origins is None:
+        env_origins = os.environ.get("MCF_CORS_ORIGINS")
+        if env_origins:
+            cors_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+
     app = FastAPI(
         title="MCF Semantic Search API",
         description="Semantic job search with hybrid BM25 + vector ranking",

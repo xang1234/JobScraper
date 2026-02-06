@@ -2078,5 +2078,86 @@ def _display_search_results(response: SearchResponse, query: str) -> None:
     console.print(f"\n[dim]Tip: Use --json for programmatic access[/dim]")
 
 
+# API server command
+
+
+@app.command(name="api-serve")
+def serve_api(
+    host: str = typer.Option("127.0.0.1", "--host", "-H", help="Host to bind to"),
+    port: int = typer.Option(8000, "--port", "-p", help="Port to bind to"),
+    db_path: str = typer.Option(
+        "data/mcf_jobs.db", "--db", help="Path to SQLite database"
+    ),
+    index_dir: str = typer.Option(
+        "data/embeddings", "--index-dir", help="Path to FAISS indexes"
+    ),
+    reload: bool = typer.Option(
+        False, "--reload", help="Enable auto-reload for development"
+    ),
+    workers: int = typer.Option(
+        1, "--workers", "-w", help="Number of worker processes (production)"
+    ),
+    cors_origins: str = typer.Option(
+        "http://localhost:3000,http://localhost:5173",
+        "--cors",
+        help="Comma-separated CORS origins",
+    ),
+) -> None:
+    """
+    Start the semantic search API server.
+
+    Examples:
+        mcf api-serve                     # Start on localhost:8000
+        mcf api-serve --port 9000         # Custom port
+        mcf api-serve --reload            # Auto-reload for dev
+        mcf api-serve --workers 4         # Production mode
+    """
+    import os
+    import uvicorn
+
+    origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+
+    # Check prerequisites
+    if not Path(db_path).exists():
+        console.print(f"[red]Error:[/red] Database not found: {db_path}")
+        console.print("Run 'mcf scrape' first to populate the database.")
+        raise typer.Exit(1)
+
+    index_path = Path(index_dir)
+    if not (index_path / "jobs.index").exists():
+        console.print(
+            f"[yellow]Warning:[/yellow] FAISS index not found in {index_dir}"
+        )
+        console.print("API will run in degraded mode (keyword search only).")
+        console.print("Run 'mcf embed-generate' to enable semantic search.")
+
+    # Display startup info
+    console.print("\n[bold green]Starting MCF Semantic Search API[/bold green]")
+    console.print(f"  Database:   {db_path}")
+    console.print(f"  Index dir:  {index_dir}")
+    console.print(f"  Endpoint:   http://{host}:{port}")
+    console.print(f"  API docs:   http://{host}:{port}/docs")
+    console.print(f"  CORS:       {', '.join(origins)}")
+    if reload:
+        console.print("  Mode:       [yellow]Development (auto-reload)[/yellow]")
+    else:
+        console.print(f"  Mode:       Production ({workers} worker{'s' if workers != 1 else ''})")
+    console.print()
+
+    # Pass config via environment so uvicorn workers can pick it up
+    os.environ["MCF_DB_PATH"] = db_path
+    os.environ["MCF_INDEX_DIR"] = index_dir
+    os.environ["MCF_CORS_ORIGINS"] = cors_origins
+
+    uvicorn.run(
+        "src.api.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        workers=1 if reload else workers,
+        log_level="info",
+    )
+
+
 if __name__ == "__main__":
     app()
