@@ -358,6 +358,49 @@ class TestFTS5Search:
 
         assert all(isinstance(r[1], float) for r in results)
 
+    def test_bm25_search_filtered_restricts_to_candidates(self, test_db: MCFDatabase):
+        """Test that filtered BM25 only returns candidates from the given set."""
+        # Insert two jobs with the same keyword
+        job_a = generate_test_job(title="Python Developer Alpha")
+        job_b = generate_test_job(title="Python Developer Beta")
+        test_db.upsert_job(job_a)
+        test_db.upsert_job(job_b)
+
+        # Only allow job_a as a candidate
+        results = test_db.bm25_search_filtered("Python", {job_a.uuid})
+
+        result_uuids = {r[0] for r in results}
+        assert job_a.uuid in result_uuids
+        assert job_b.uuid not in result_uuids
+
+    def test_bm25_search_filtered_scores_all_matching_candidates(
+        self, test_db: MCFDatabase
+    ):
+        """Test that filtered BM25 scores every matching candidate, not just top-N."""
+        # Insert many jobs so the candidate set is smaller than the full corpus
+        target_jobs = []
+        for i in range(5):
+            job = generate_test_job(title=f"Zebra Specialist Position {i}")
+            test_db.upsert_job(job)
+            target_jobs.append(job)
+
+        # Also insert decoy jobs with the same keyword
+        for i in range(10):
+            decoy = generate_test_job(title=f"Zebra Manager Decoy {i}")
+            test_db.upsert_job(decoy)
+
+        candidate_uuids = {j.uuid for j in target_jobs}
+        results = test_db.bm25_search_filtered("Zebra", candidate_uuids)
+
+        # All 5 target jobs should be scored (they all match "Zebra")
+        result_uuids = {r[0] for r in results}
+        assert result_uuids == candidate_uuids
+
+    def test_bm25_search_filtered_empty_candidates(self, test_db: MCFDatabase):
+        """Test filtered BM25 with empty candidate set returns nothing."""
+        results = test_db.bm25_search_filtered("Engineer", set())
+        assert results == []
+
     def test_rebuild_fts_index(self, test_db: MCFDatabase):
         """Test FTS index rebuild doesn't error."""
         # Should complete without error

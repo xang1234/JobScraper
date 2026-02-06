@@ -774,6 +774,9 @@ class SemanticSearchEngine:
         """
         Get BM25 scores for candidates.
 
+        Uses filtered BM25 search that restricts scoring to the candidate set,
+        ensuring no relevant candidate is missed due to global ranking cutoffs.
+
         Args:
             query: Search query
             candidate_uuids: UUIDs to score
@@ -782,17 +785,14 @@ class SemanticSearchEngine:
             Dict mapping uuid -> BM25 score (higher = more relevant)
         """
         try:
-            # BM25 returns negative scores (lower = better)
-            bm25_results = self.db.bm25_search(query, limit=len(candidate_uuids))
-
-            # Convert to positive scores (negate)
-            # and filter to candidates
             candidate_set = set(candidate_uuids)
+            # BM25 returns negative scores (lower = better)
+            bm25_results = self.db.bm25_search_filtered(query, candidate_set)
+
+            # Negate to make higher = better
             scores = {}
             for uuid, score in bm25_results:
-                if uuid in candidate_set:
-                    # Negate to make higher = better, and shift to positive range
-                    scores[uuid] = -score
+                scores[uuid] = -score
 
             return scores
         except Exception as e:

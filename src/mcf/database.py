@@ -1599,6 +1599,53 @@ class MCFDatabase:
 
         return [(row[0], row[1]) for row in rows]
 
+    def bm25_search_filtered(
+        self, query: str, candidate_uuids: set[str]
+    ) -> list[tuple[str, float]]:
+        """
+        Full-text search restricted to a set of candidate UUIDs.
+
+        Unlike bm25_search which scores globally then filters, this method
+        only scores and returns results for the specified candidates. This
+        ensures no relevant candidate is missed due to global ranking cutoffs.
+
+        Args:
+            query: Search query (supports FTS5 query syntax)
+            candidate_uuids: Set of UUIDs to restrict scoring to
+
+        Returns:
+            List of (uuid, bm25_score) tuples for matching candidates.
+            Lower scores = more relevant (BM25 returns negative scores).
+        """
+        if not candidate_uuids:
+            return []
+
+        with self._connection() as conn:
+            # Use a temp table for efficient JOIN with the FTS index.
+            # This lets SQLite compute BM25 only for matching candidates
+            # rather than ranking the entire corpus first.
+            conn.execute(
+                "CREATE TEMP TABLE IF NOT EXISTS _bm25_candidates (uuid TEXT PRIMARY KEY)"
+            )
+            conn.execute("DELETE FROM _bm25_candidates")
+            conn.executemany(
+                "INSERT INTO _bm25_candidates (uuid) VALUES (?)",
+                [(u,) for u in candidate_uuids],
+            )
+
+            rows = conn.execute(
+                """
+                SELECT f.uuid, bm25(jobs_fts) as score
+                FROM jobs_fts f
+                INNER JOIN _bm25_candidates c ON c.uuid = f.uuid
+                WHERE jobs_fts MATCH ?
+                ORDER BY score
+                """,
+                (query,),
+            ).fetchall()
+
+        return [(row[0], row[1]) for row in rows]
+
     def rebuild_fts_index(self) -> None:
         """
         Rebuild FTS index from jobs table.
