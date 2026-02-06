@@ -114,7 +114,6 @@ class HistoricalScraper:
         self.initial_rps = requests_per_second
         self.not_found_threshold = not_found_threshold
         self._client: Optional[MCFClient] = None
-        self._existing_uuids: set[str] = set()
 
         # New components for robust operation
         self.batch_logger = BatchLogger(self.db, batch_size=batch_size)
@@ -128,9 +127,6 @@ class HistoricalScraper:
         """Async context manager entry."""
         self._client = MCFClient(requests_per_second=self.initial_rps)
         await self._client.__aenter__()
-        # Load existing UUIDs for deduplication
-        self._existing_uuids = self.db.get_all_uuids()
-        logger.info(f"Loaded {len(self._existing_uuids):,} existing job UUIDs")
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -206,8 +202,8 @@ class HistoricalScraper:
         job_id = self.format_job_id(year, sequence)
         uuid = self.job_id_to_uuid(job_id)
 
-        # Skip if already in database
-        if uuid in self._existing_uuids:
+        # Skip if already in database (indexed point query, ~0.1ms)
+        if self.db.has_job(uuid):
             logger.debug(f"Skipping existing job: {job_id}")
             return None
 
@@ -294,7 +290,7 @@ class HistoricalScraper:
                     # In dry run, just count without fetching
                     job_id = self.format_job_id(year, current_seq)
                     uuid = self.job_id_to_uuid(job_id)
-                    if uuid in self._existing_uuids:
+                    if self.db.has_job(uuid):
                         jobs_found += 1
                         self.batch_logger.log(year, current_seq, 'skipped')
                     else:
@@ -309,7 +305,6 @@ class HistoricalScraper:
                     if job:
                         # Save to database
                         is_new, was_updated = self.db.upsert_job(job)
-                        self._existing_uuids.add(job.uuid)
                         jobs_found += 1
                         consecutive_not_found = 0
 
@@ -327,7 +322,7 @@ class HistoricalScraper:
                         jobs_not_found += 1
                         # Check if it was skipped (already exists) vs truly not found
                         uuid = self.job_id_to_uuid(self.format_job_id(year, current_seq))
-                        if uuid not in self._existing_uuids:
+                        if not self.db.has_job(uuid):
                             consecutive_not_found += 1
                             self.batch_logger.log(year, current_seq, 'not_found')
                         else:
@@ -610,7 +605,6 @@ class HistoricalScraper:
 
                 if job:
                     is_new, _ = self.db.upsert_job(job)
-                    self._existing_uuids.add(job.uuid)
                     jobs_found += 1
                     self.batch_logger.log(year, seq, 'found')
                     self.rate_limiter.on_success()
@@ -619,7 +613,7 @@ class HistoricalScraper:
                         logger.debug(f"Recovered job: {job.title[:50]}")
                 else:
                     uuid = self.job_id_to_uuid(self.format_job_id(year, seq))
-                    if uuid in self._existing_uuids:
+                    if self.db.has_job(uuid):
                         self.batch_logger.log(year, seq, 'skipped')
                     else:
                         self.batch_logger.log(year, seq, 'not_found')
