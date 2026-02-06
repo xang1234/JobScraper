@@ -15,6 +15,7 @@ Usage:
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -51,6 +52,11 @@ logger = logging.getLogger(__name__)
 # Global search engine instance (set during lifespan)
 _search_engine: Optional[SemanticSearchEngine] = None
 
+# Single-worker executor serializes all engine access, preventing
+# concurrent mutation of TTLCache and other non-thread-safe state.
+# FAISS/numpy still release the GIL, so CPU work parallelizes natively.
+_engine_executor = ThreadPoolExecutor(max_workers=1)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -65,7 +71,7 @@ async def lifespan(app: FastAPI):
 
     # Load in a thread to avoid blocking the event loop during startup
     loop = asyncio.get_running_loop()
-    loaded = await loop.run_in_executor(None, _search_engine.load)
+    loaded = await loop.run_in_executor(_engine_executor, _search_engine.load)
 
     if loaded:
         logger.info("Search indexes loaded successfully")
@@ -190,7 +196,7 @@ def _register_routes(app: FastAPI) -> None:
         internal_req = request.to_internal()
         loop = asyncio.get_running_loop()
         try:
-            internal_resp = await loop.run_in_executor(None, engine.search, internal_req)
+            internal_resp = await loop.run_in_executor(_engine_executor, engine.search, internal_req)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return SearchResponse.from_internal(internal_resp)
@@ -325,7 +331,7 @@ def _register_routes(app: FastAPI) -> None:
     ) -> StatsResponse:
         """Get system statistics (index size, coverage, etc.)."""
         loop = asyncio.get_running_loop()
-        raw = await loop.run_in_executor(None, engine.get_stats)
+        raw = await loop.run_in_executor(_engine_executor, engine.get_stats)
         emb = raw.get("embedding_stats", {})
         idx = raw.get("index_stats", {})
         return StatsResponse(
