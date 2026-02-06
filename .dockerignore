@@ -1,0 +1,56 @@
+# Version control — history not needed in containers
+.git
+
+# Python virtual environments — deps installed fresh in container
+.venv
+venv
+ENV
+env
+
+# Python bytecode — regenerated at runtime
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+
+# Runtime data — mounted as volumes, NOT baked into images
+data/
+
+# Frontend build artifacts — rebuilt in container
+src/frontend/node_modules
+src/frontend/dist
+
+# Legacy code — not used by the API/frontend
+src/legacy
+
+# OS and editor artifacts
+.DS_Store
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode
+.idea
+
+# Secrets — must never enter an image layer
+.env
+*.pem
+*.key
+credentials.json
+
+# Issue tracker — not needed in container
+.beads
+.bv
+
+# Testing artifacts
+.coverage
+htmlcov
+.tox
+.nox
+
+# Python build artifacts
+build
+dist
+*.egg-info
