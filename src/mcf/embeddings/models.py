@@ -210,6 +210,9 @@ class SkillSearchRequest:
     skill: str
     limit: int = 20
     min_similarity: float = 0.3
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    employment_type: Optional[str] = None
 
 
 @dataclass

@@ -161,6 +161,9 @@ class SkillSearchRequest(BaseModel):
         return InternalSkillSearchRequest(
             skill=self.skill,
             limit=self.limit,
+            salary_min=self.salary_min,
+            salary_max=self.salary_max,
+            employment_type=self.employment_type,
         )
 
 

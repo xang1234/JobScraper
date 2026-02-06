@@ -404,16 +404,42 @@ class SemanticSearchEngine:
             )
 
         try:
-            # Search job index with skill embedding
-            results = self.index_manager.search_jobs(skill_embedding, k=request.limit * 2)
+            has_sql_filters = any([
+                request.salary_min is not None,
+                request.salary_max is not None,
+                request.employment_type is not None,
+            ])
+
+            # Fetch more candidates when SQL filters will reduce the set
+            k_multiplier = 4 if has_sql_filters else 2
+            results = self.index_manager.search_jobs(
+                skill_embedding, k=request.limit * k_multiplier,
+            )
 
             # Filter by minimum similarity
             filtered = [
                 (uuid, score)
                 for uuid, score in results
                 if score >= request.min_similarity
-            ][: request.limit]
+            ]
 
+            # Apply SQL filters by intersecting with DB results
+            if has_sql_filters and filtered:
+                sql_filter_request = SearchRequest(
+                    query="",
+                    salary_min=request.salary_min,
+                    salary_max=request.salary_max,
+                    employment_type=request.employment_type,
+                )
+                sql_matches = self._apply_sql_filters(sql_filter_request)
+                allowed_uuids = {job["uuid"] for job in sql_matches}
+                filtered = [
+                    (uuid, score)
+                    for uuid, score in filtered
+                    if uuid in allowed_uuids
+                ]
+
+            filtered = filtered[: request.limit]
             results_enriched = self._enrich_results(filtered)
 
             return SearchResponse(
@@ -666,6 +692,7 @@ class SemanticSearchEngine:
             salary_max=request.salary_max,
             employment_type=request.employment_type,
             company_name=request.company,
+            region=request.region,
             limit=100000,  # Get all matching for ranking
         )
 

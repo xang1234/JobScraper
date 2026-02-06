@@ -584,6 +584,7 @@ class MCFDatabase:
         salary_min: Optional[int] = None,
         salary_max: Optional[int] = None,
         employment_type: Optional[str] = None,
+        region: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
@@ -596,6 +597,7 @@ class MCFDatabase:
             salary_min: Minimum salary filter
             salary_max: Maximum salary filter
             employment_type: Filter by employment type
+            region: Filter by region (exact match)
             limit: Max results to return
             offset: Results offset for pagination
 
@@ -627,6 +629,10 @@ class MCFDatabase:
         if employment_type:
             conditions.append("employment_type = ?")
             params.append(employment_type)
+
+        if region:
+            conditions.append("region = ?")
+            params.append(region)
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
 

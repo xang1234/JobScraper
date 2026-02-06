@@ -186,6 +186,24 @@ class TestSkillSearchRequest:
         internal = req.to_internal()
         assert internal.skill == "Python"
         assert internal.limit == 30
+        assert internal.salary_min is None
+        assert internal.salary_max is None
+        assert internal.employment_type is None
+
+    def test_to_internal_with_filters(self):
+        req = SkillSearchRequest(
+            skill="Python",
+            limit=30,
+            salary_min=8000,
+            salary_max=15000,
+            employment_type="Full Time",
+        )
+        internal = req.to_internal()
+        assert internal.skill == "Python"
+        assert internal.limit == 30
+        assert internal.salary_min == 8000
+        assert internal.salary_max == 15000
+        assert internal.employment_type == "Full Time"
 
 
 # =============================================================================
