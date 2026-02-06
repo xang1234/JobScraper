@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .middleware import RateLimitMiddleware, RequestLoggingMiddleware
 from .models import (
     CompanySimilarity,
     CompanySimilarityRequest,
@@ -84,6 +85,7 @@ def create_app(
     db_path: str | None = None,
     index_dir: str | None = None,
     cors_origins: Optional[list[str]] = None,
+    rate_limit_rpm: int | None = None,
 ) -> FastAPI:
     """
     Application factory.
@@ -96,6 +98,9 @@ def create_app(
         cors_origins: Allowed CORS origins.  Falls back to
             ``MCF_CORS_ORIGINS`` env var (comma-separated), then
             common localhost ports.
+        rate_limit_rpm: Max requests per minute per IP.  Falls back to
+            ``MCF_RATE_LIMIT_RPM`` env var, then ``100``.  Set to ``0``
+            to disable rate limiting.
     """
     import os
 
@@ -107,6 +112,8 @@ def create_app(
         env_origins = os.environ.get("MCF_CORS_ORIGINS")
         if env_origins:
             cors_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
+    if rate_limit_rpm is None:
+        rate_limit_rpm = int(os.environ.get("MCF_RATE_LIMIT_RPM", "100"))
 
     app = FastAPI(
         title="MCF Semantic Search API",
@@ -124,10 +131,20 @@ def create_app(
     # Store config on app state so lifespan can access it
     app.state.db_path = db_path
     app.state.index_dir = index_dir
+    app.state.rate_limit_rpm = rate_limit_rpm
 
     if cors_origins is None:
         cors_origins = ["http://localhost:3000", "http://localhost:5173"]
 
+    # Middleware execution order (outermost first):
+    #   Logging → CORS → RateLimit → App
+    # add_middleware prepends, so we add in reverse order.
+
+    # 1. Rate limiting (innermost — added first)
+    if rate_limit_rpm > 0:
+        app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit_rpm)
+
+    # 2. CORS (wraps rate limiter — 429s get CORS headers)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -135,6 +152,9 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 3. Request logging (outermost — sees everything)
+    app.add_middleware(RequestLoggingMiddleware)
 
     _register_routes(app)
     _register_exception_handlers(app)

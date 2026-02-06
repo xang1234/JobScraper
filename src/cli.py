@@ -2102,6 +2102,11 @@ def serve_api(
         "--cors",
         help="Comma-separated CORS origins",
     ),
+    api_rate_limit: int = typer.Option(
+        100,
+        "--rate-limit",
+        help="Max requests per minute per IP (0 to disable)",
+    ),
 ) -> None:
     """
     Start the semantic search API server.
@@ -2138,6 +2143,10 @@ def serve_api(
     console.print(f"  Endpoint:   http://{host}:{port}")
     console.print(f"  API docs:   http://{host}:{port}/docs")
     console.print(f"  CORS:       {', '.join(origins)}")
+    if api_rate_limit > 0:
+        console.print(f"  Rate limit: {api_rate_limit} req/min per IP")
+    else:
+        console.print("  Rate limit: [yellow]disabled[/yellow]")
     if reload:
         console.print("  Mode:       [yellow]Development (auto-reload)[/yellow]")
     else:
@@ -2148,6 +2157,7 @@ def serve_api(
     os.environ["MCF_DB_PATH"] = db_path
     os.environ["MCF_INDEX_DIR"] = index_dir
     os.environ["MCF_CORS_ORIGINS"] = cors_origins
+    os.environ["MCF_RATE_LIMIT_RPM"] = str(api_rate_limit)
 
     uvicorn.run(
         "src.api.app:app",
