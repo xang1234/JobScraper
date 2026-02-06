@@ -2,7 +2,6 @@
 
 import logging
 import time
-from collections import defaultdict
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -35,7 +34,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self.requests_per_minute = requests_per_minute
         self.window_seconds = 60.0
         # IP -> list of monotonic timestamps
-        self._hits: dict[str, list[float]] = defaultdict(list)
+        self._hits: dict[str, list[float]] = {}
 
     async def dispatch(self, request: Request, call_next):
         ip = get_client_ip(request)
@@ -43,9 +42,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         cutoff = now - self.window_seconds
 
         # Prune expired timestamps for this IP
-        timestamps = self._hits[ip]
-        self._hits[ip] = [t for t in timestamps if t > cutoff]
-        timestamps = self._hits[ip]
+        timestamps = [t for t in self._hits.get(ip, ()) if t > cutoff]
+
+        if not timestamps:
+            # Remove stale key so the dict doesn't grow unbounded
+            self._hits.pop(ip, None)
+        else:
+            self._hits[ip] = timestamps
 
         if len(timestamps) >= self.requests_per_minute:
             return JSONResponse(
@@ -59,6 +62,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             )
 
         timestamps.append(now)
+        self._hits[ip] = timestamps
         return await call_next(request)
 
 
