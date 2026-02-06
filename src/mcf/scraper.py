@@ -16,7 +16,7 @@ from typing import Callable, Optional
 
 from rich.progress import Progress, TaskID
 
-from .api_client import MCFClient, MCFAPIError
+from .api_client import MCFClient, MCFAPIError, MCFRateLimitError
 from .models import Job, Checkpoint
 from .storage import JobStorage, SQLiteStorage
 
@@ -173,6 +173,14 @@ class MCFScraper:
                         limit=current_batch_size,
                         offset=offset,
                     )
+                except MCFRateLimitError:
+                    backoff = 1.0 / self.requests_per_second + 5.0
+                    logger.warning(
+                        f"Rate limited at offset {offset}, "
+                        f"backing off {backoff:.1f}s"
+                    )
+                    await asyncio.sleep(backoff)
+                    continue
                 except MCFAPIError as e:
                     logger.error(f"API error at offset {offset}: {e}")
                     break
