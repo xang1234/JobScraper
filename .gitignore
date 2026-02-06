@@ -44,6 +44,14 @@ data/*.json
 data/*.log
 data/.scraper.pid
 data/scrape_jsons/*json
+data/embeddings/
+
+# Pickle / binary artifacts
+*.pkl
+
+# Log files
+*.log
+
 # macOS
 .DS_Store
 
@@ -64,6 +72,10 @@ credentials.json
 
 # bv (beads viewer) local config and caches
 .bv/
+*.bv.lock
+
+# Playwright MCP
+.playwright-mcp/
 
 # Frontend
 src/frontend/node_modules/
