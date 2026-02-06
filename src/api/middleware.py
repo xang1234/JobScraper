@@ -2,6 +2,7 @@
 
 import logging
 import time
+from typing import Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -10,15 +11,27 @@ from starlette.middleware.base import BaseHTTPMiddleware
 logger = logging.getLogger("src.api.access")
 
 
-def get_client_ip(request: Request) -> str:
-    """Extract client IP from request, respecting X-Forwarded-For."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        # First IP in the comma-separated list is the original client
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
+def get_client_ip(
+    request: Request,
+    trusted_proxies: Optional[frozenset[str]] = None,
+) -> str:
+    """Extract client IP, only trusting X-Forwarded-For from known proxies.
+
+    Args:
+        request: The incoming HTTP request.
+        trusted_proxies: Set of proxy IPs allowed to set X-Forwarded-For.
+            When the direct connection comes from one of these IPs, the
+            first address in X-Forwarded-For is returned.  Otherwise the
+            header is ignored and request.client.host is used directly.
+    """
+    direct_ip = request.client.host if request.client else None
+
+    if trusted_proxies and direct_ip in trusted_proxies:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
+    return direct_ip or "unknown"
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -29,15 +42,21 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     keeping memory bounded.
     """
 
-    def __init__(self, app, requests_per_minute: int = 100):
+    def __init__(
+        self,
+        app,
+        requests_per_minute: int = 100,
+        trusted_proxies: Optional[frozenset[str]] = None,
+    ):
         super().__init__(app)
         self.requests_per_minute = requests_per_minute
         self.window_seconds = 60.0
+        self.trusted_proxies = trusted_proxies
         # IP -> list of monotonic timestamps
         self._hits: dict[str, list[float]] = {}
 
     async def dispatch(self, request: Request, call_next):
-        ip = get_client_ip(request)
+        ip = get_client_ip(request, self.trusted_proxies)
         now = time.monotonic()
         cutoff = now - self.window_seconds
 
@@ -69,12 +88,20 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Logs every request with method, path, status, duration, and client IP."""
 
+    def __init__(
+        self,
+        app,
+        trusted_proxies: Optional[frozenset[str]] = None,
+    ):
+        super().__init__(app)
+        self.trusted_proxies = trusted_proxies
+
     async def dispatch(self, request: Request, call_next):
         start = time.monotonic()
         response = await call_next(request)
         duration_ms = (time.monotonic() - start) * 1000
 
-        ip = get_client_ip(request)
+        ip = get_client_ip(request, self.trusted_proxies)
         logger.info(
             "%s %s %d %.0fms %s",
             request.method,

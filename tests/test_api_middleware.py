@@ -21,7 +21,10 @@ from src.api.middleware import (
 # =============================================================================
 
 
-def _make_test_app(rate_limit: int | None = None) -> FastAPI:
+def _make_test_app(
+    rate_limit: int | None = None,
+    trusted_proxies: frozenset[str] | None = None,
+) -> FastAPI:
     """Minimal FastAPI app for isolated middleware testing."""
     app = FastAPI()
 
@@ -34,9 +37,13 @@ def _make_test_app(rate_limit: int | None = None) -> FastAPI:
         return {"slow": True}
 
     if rate_limit is not None:
-        app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit)
+        app.add_middleware(
+            RateLimitMiddleware,
+            requests_per_minute=rate_limit,
+            trusted_proxies=trusted_proxies,
+        )
 
-    app.add_middleware(RequestLoggingMiddleware)
+    app.add_middleware(RequestLoggingMiddleware, trusted_proxies=trusted_proxies)
     return app
 
 
@@ -65,24 +72,38 @@ class TestGetClientIp:
         req = _make_request(client_host="192.168.1.5")
         assert get_client_ip(req) == "192.168.1.5"
 
-    def test_x_forwarded_for_single(self):
-        req = _make_request(headers={"X-Forwarded-For": "10.0.0.1"})
-        assert get_client_ip(req) == "10.0.0.1"
+    def test_forwarded_ignored_without_trusted_proxies(self):
+        """X-Forwarded-For is ignored when no trusted proxies are configured."""
+        req = _make_request(
+            headers={"X-Forwarded-For": "10.0.0.1"},
+            client_host="192.168.1.5",
+        )
+        assert get_client_ip(req) == "192.168.1.5"
 
-    def test_x_forwarded_for_chain(self):
-        req = _make_request(headers={"X-Forwarded-For": "203.0.113.50, 70.41.3.18, 150.172.238.178"})
-        assert get_client_ip(req) == "203.0.113.50"
+    def test_forwarded_trusted_when_proxy_in_allowlist(self):
+        req = _make_request(
+            headers={"X-Forwarded-For": "10.0.0.1"},
+            client_host="127.0.0.1",
+        )
+        assert get_client_ip(req, trusted_proxies=frozenset({"127.0.0.1"})) == "10.0.0.1"
+
+    def test_forwarded_chain_returns_first_ip(self):
+        req = _make_request(
+            headers={"X-Forwarded-For": "203.0.113.50, 70.41.3.18, 150.172.238.178"},
+            client_host="10.0.0.1",
+        )
+        assert get_client_ip(req, trusted_proxies=frozenset({"10.0.0.1"})) == "203.0.113.50"
+
+    def test_forwarded_ignored_when_proxy_not_in_allowlist(self):
+        req = _make_request(
+            headers={"X-Forwarded-For": "10.0.0.1"},
+            client_host="192.168.1.5",
+        )
+        assert get_client_ip(req, trusted_proxies=frozenset({"127.0.0.1"})) == "192.168.1.5"
 
     def test_no_client_at_all(self):
         req = _make_request(headers={}, client_host=None)
         assert get_client_ip(req) == "unknown"
-
-    def test_forwarded_takes_precedence_over_client(self):
-        req = _make_request(
-            headers={"X-Forwarded-For": "1.2.3.4"},
-            client_host="127.0.0.1",
-        )
-        assert get_client_ip(req) == "1.2.3.4"
 
 
 # =============================================================================
@@ -118,7 +139,8 @@ class TestRateLimitMiddleware:
         assert "1 requests/minute" in data["error"]["message"]
 
     def test_different_ips_tracked_separately(self):
-        app = _make_test_app(rate_limit=2)
+        # TestClient connects from "testclient"; trust it so X-Forwarded-For works
+        app = _make_test_app(rate_limit=2, trusted_proxies=frozenset({"testclient"}))
         client = TestClient(app, raise_server_exceptions=False)
 
         # IP A: 2 requests (at limit)
@@ -133,6 +155,18 @@ class TestRateLimitMiddleware:
         # IP B: still allowed
         resp = client.get("/ping", headers={"X-Forwarded-For": "2.2.2.2"})
         assert resp.status_code == 200
+
+    def test_forwarded_header_ignored_without_trusted_proxies(self):
+        """Without trusted proxies, all requests share the same direct IP."""
+        app = _make_test_app(rate_limit=2)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        # Even though different X-Forwarded-For, they share the same direct IP
+        client.get("/ping", headers={"X-Forwarded-For": "1.1.1.1"})
+        client.get("/ping", headers={"X-Forwarded-For": "2.2.2.2"})
+        # Third request exceeds limit because both counted under the same IP
+        resp = client.get("/ping", headers={"X-Forwarded-For": "3.3.3.3"})
+        assert resp.status_code == 429
 
     def test_window_expiry_allows_new_requests(self):
         """After the sliding window passes, requests should be allowed again."""
@@ -176,7 +210,7 @@ class TestRequestLoggingMiddleware:
         assert any("ms" in rec.message for rec in caplog.records)
 
     def test_logs_client_ip(self, caplog):
-        app = _make_test_app()
+        app = _make_test_app(trusted_proxies=frozenset({"testclient"}))
         client = TestClient(app, raise_server_exceptions=False)
         with caplog.at_level(logging.INFO, logger="src.api.access"):
             client.get("/ping", headers={"X-Forwarded-For": "5.6.7.8"})

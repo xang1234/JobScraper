@@ -96,6 +96,7 @@ def create_app(
     index_dir: str | None = None,
     cors_origins: Optional[list[str]] = None,
     rate_limit_rpm: int | None = None,
+    trusted_proxies: frozenset[str] | None = None,
 ) -> FastAPI:
     """
     Application factory.
@@ -111,6 +112,10 @@ def create_app(
         rate_limit_rpm: Max requests per minute per IP.  Falls back to
             ``MCF_RATE_LIMIT_RPM`` env var, then ``100``.  Set to ``0``
             to disable rate limiting.
+        trusted_proxies: Proxy IPs allowed to set X-Forwarded-For.
+            Falls back to ``MCF_TRUSTED_PROXIES`` env var (comma-separated).
+            When empty (default), X-Forwarded-For is ignored and the
+            direct connection IP is always used.
     """
     import os
 
@@ -124,6 +129,10 @@ def create_app(
             cors_origins = [o.strip() for o in env_origins.split(",") if o.strip()]
     if rate_limit_rpm is None:
         rate_limit_rpm = int(os.environ.get("MCF_RATE_LIMIT_RPM", "100"))
+    if trusted_proxies is None:
+        env_proxies = os.environ.get("MCF_TRUSTED_PROXIES", "")
+        ips = [ip.strip() for ip in env_proxies.split(",") if ip.strip()]
+        trusted_proxies = frozenset(ips) if ips else None
 
     app = FastAPI(
         title="MCF Semantic Search API",
@@ -152,7 +161,11 @@ def create_app(
 
     # 1. Rate limiting (innermost — added first)
     if rate_limit_rpm > 0:
-        app.add_middleware(RateLimitMiddleware, requests_per_minute=rate_limit_rpm)
+        app.add_middleware(
+            RateLimitMiddleware,
+            requests_per_minute=rate_limit_rpm,
+            trusted_proxies=trusted_proxies,
+        )
 
     # 2. CORS (wraps rate limiter — 429s get CORS headers)
     app.add_middleware(
@@ -164,7 +177,7 @@ def create_app(
     )
 
     # 3. Request logging (outermost — sees everything)
-    app.add_middleware(RequestLoggingMiddleware)
+    app.add_middleware(RequestLoggingMiddleware, trusted_proxies=trusted_proxies)
 
     _register_routes(app)
     _register_exception_handlers(app)
