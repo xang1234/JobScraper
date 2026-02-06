@@ -1,0 +1,54 @@
+# Production overrides for homelab deployment.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+
+services:
+  backend:
+    restart: unless-stopped
+    environment:
+      - MCF_RATE_LIMIT_RPM=100
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: "2.0"
+        reservations:
+          memory: 2G
+          cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  frontend:
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.5"
+        reservations:
+          memory: 32M
+          cpus: "0.1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# Bind mounts for direct host access (backups, inspection).
+# Adjust the device paths to match your homelab layout.
+# Host directories must exist: mkdir -p /opt/mcf/data/embeddings /opt/mcf/hf-cache
+volumes:
+  mcf-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/mcf/data
+  hf-cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /opt/mcf/hf-cache
